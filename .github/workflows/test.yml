@@ -1,0 +1,38 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["20", "22"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # テストは Node の組み込みモジュールだけで完結し、xrandr も
+      # モックするため、依存のインストールも実ディスプレイも要らない。
+      - name: 構文チェック
+        run: npm run check
+
+      - name: 単体テスト
+        run: npm test
+
+      # npm run check は JavaScript のみを見る。シェルスクリプトは
+      # bash が確実にある CI 側で検査する。
+      - name: シェルスクリプト構文チェック
+        run: |
+          for f in ensure-display-size.sh start-chrome.sh scripts/*.sh legacy/*.sh; do
+            echo "checking $f"
+            bash -n "$f"
+          done

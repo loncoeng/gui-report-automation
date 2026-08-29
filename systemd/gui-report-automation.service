@@ -1,0 +1,14 @@
+[Unit]
+Description=GUI Report Automation using resident Chrome
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/automation/gui-report-automation/app
+Environment=AUTOMATION_HOME=/home/automation/gui-report-automation
+Environment=AUTOMATION_CONFIG=/home/automation/gui-report-automation/app/config/automation.live.json
+Environment=DISPLAY=:20
+Environment=XAUTHORITY=/home/automation/.Xauthority
+ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 75 /home/automation/gui-report-automation/run.lock /usr/bin/npm run resident-live
+SuccessExitStatus=75

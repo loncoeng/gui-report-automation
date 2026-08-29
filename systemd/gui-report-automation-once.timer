@@ -1,0 +1,11 @@
+[Unit]
+Description=One-time GUI Report Automation at 2026-08-15 08:30 JST
+
+[Timer]
+OnCalendar=2026-08-15 08:30:00 Asia/Tokyo
+Unit=gui-report-automation-once.service
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

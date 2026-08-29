@@ -1,0 +1,13 @@
+[Unit]
+Description=GUI Report Automation one-time run on 2026-08-15 for report date 2026-08-14
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/automation/gui-report-automation/app
+Environment=AUTOMATION_HOME=/home/automation/gui-report-automation
+Environment=AUTOMATION_CONFIG=/home/automation/gui-report-automation/app/config/automation.once.example.json
+Environment=DISPLAY=:20
+Environment=XAUTHORITY=/home/automation/.Xauthority
+ExecStart=/usr/bin/npm run resident-live

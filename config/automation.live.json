@@ -1,0 +1,98 @@
+{
+  "timezone": "Asia/Tokyo",
+  "skipDaysOfMonth": [2],
+  "schedule": {
+    "enabled": true,
+    "startTime": "06:30"
+  },
+  "safety": {
+    "executionEnabled": true,
+    "allowDownloads": true,
+    "allowUploads": true,
+    "allowGas": true,
+    "allowChatwork": true,
+    "allowCleanup": true,
+    "allowGoogleSignInRecovery": true,
+    "onlyReportDate": null
+  },
+  "waits": {
+    "actionSettleMs": 5000,
+    "navigationSettleMs": 10000,
+    "pollIntervalMs": 5000,
+    "sheetReadyTimeoutMs": 600000,
+    "sheetStableWindowMs": 30000,
+    "staleReloadAfterMs": 60000,
+    "downloadTimeoutMs": 180000,
+    "uploadTimeoutMs": 300000,
+    "gasDialogTimeoutMs": 360000,
+    "postGasOkSettleMs": 20000,
+    "dateAvailabilityRetryDelayMs": 180000
+  },
+  "browser": {
+    "channel": "chrome",
+    "headless": false,
+    "sourceProfileDirectory": "Default",
+    "workspaceProfileDirectory": "Profile 1",
+    "workspaceAccountEmail": "workspace-account@example.com"
+  },
+  "admin": {
+    "url": "https://admin.example.com/reports/daily",
+    "authenticatedMarker": "Sign Out",
+    "requiredRegion": "JP",
+    "googleSignInLabels": ["Sign in with Google", "Googleでログイン"],
+    "googleAccountMatch": "source-account",
+    "googleAccountEmail": "source-account@example.com",
+    "googleSignInTimeoutMs": 90000
+  },
+  "drive": {
+    "folderName": "レポート保存",
+    "folderId": "EXAMPLE_DRIVE_FOLDER_ID"
+  },
+  "driveReadVerification": {
+    "mode": "gce-service-account-impersonation",
+    "targetServiceAccount": "sheets-reader@example-project.iam.gserviceaccount.com",
+    "tokenLifetimeSeconds": 600,
+    "requestTimeoutMs": 20000
+  },
+  "sheetsReadVerification": {
+    "mode": "gce-service-account-impersonation",
+    "targetServiceAccount": "sheets-reader@example-project.iam.gserviceaccount.com",
+    "tokenLifetimeSeconds": 600,
+    "requestTimeoutMs": 20000
+  },
+  "sheets": [
+    {
+      "key": "import",
+      "spreadsheetId": "EXAMPLE_IMPORT_SPREADSHEET_ID",
+      "requiredSheets": ["日次集計", "月次集計"],
+      "activeSheet": "日次集計",
+      "expectedGid": "100000001",
+      "menu": "集計用",
+      "actions": ["データインポート"]
+    },
+    {
+      "key": "main",
+      "spreadsheetId": "EXAMPLE_MAIN_SPREADSHEET_ID",
+      "requiredSheets": ["実績サマリ"],
+      "activeSheet": "実績サマリ",
+      "expectedGid": "100000002",
+      "successVerification": {
+        "sheetName": "実績サマリ",
+        "column": "A",
+        "startRow": 1,
+        "endRow": 1
+      },
+      "menu": "集計用",
+      "actions": ["①データインポート", "②Chatworkに報告", "③使用済みファイル削除"]
+    },
+    {
+      "key": "department",
+      "spreadsheetId": "EXAMPLE_DEPARTMENT_SPREADSHEET_ID",
+      "requiredSheets": ["部門別サマリ"],
+      "activeSheet": "部門別サマリ",
+      "expectedGid": "100000003",
+      "menu": "数字報告用",
+      "actions": ["Chatworkに報告"]
+    }
+  ]
+}

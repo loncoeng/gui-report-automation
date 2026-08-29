@@ -1,0 +1,42 @@
+{
+  "name": "gui-report-automation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check-syntax.mjs",
+    "test": "node --test test/*.test.js",
+    "preflight": "node src/gui-preflight.js",
+    "observe": "node src/gui-observe.js",
+    "gui-dry-run": "node src/gui-dry-run.js",
+    "resident-preflight": "node src/gui-live.js --preflight",
+    "resident-live": "node src/gui-live.js --live",
+    "resident-resume-after-downloads": "node src/gui-live.js --live --resume-after-downloads",
+    "resident-resume-after-uploads": "node src/gui-live.js --live --resume-after-uploads",
+    "resume-import-dialog": "node src/resume-import-dialog.js",
+    "resident-resume-after-import-confirmed": "node src/gui-live.js --live --resume-after-import-confirmed",
+    "resident-resume-after-main-chatwork-confirmed": "node src/gui-live.js --live --resume-after-main-chatwork-confirmed",
+    "resident-resume-after-main-menu-blocked": "node src/gui-live.js --live --resume-after-main-menu-blocked",
+    "resident-resume-after-main-menu-diagnostic-stop": "node src/gui-live.js --live --resume-after-main-menu-diagnostic-stop",
+    "resume-main-import-dialog": "node src/resume-main-import-dialog.js",
+    "resident-resume-after-main-import-confirmed": "node src/gui-live.js --live --resume-after-main-import-confirmed",
+    "verify-main-gas-menu": "node src/verify-main-gas-menu.js",
+    "verify-sheets-keyless": "node scripts/verify-sheets-keyless.js",
+    "limited-through-main-menu-test": "node tools/limited-through-main-menu-test.js",
+    "limited-resume-after-duplicate": "node tools/limited-resume-after-duplicate.js",
+    "limited-after-confirmed-uploads": "node tools/limited-after-confirmed-uploads.js",
+    "diagnose-admin-controls": "node tools/diagnose-admin-controls.js",
+    "diagnose-admin-date-select": "node tools/diagnose-admin-date-select.js",
+    "diagnose-drive": "node tools/diagnose-drive.js",
+    "limited-upload-import-test": "node tools/limited-upload-import-test.js",
+    "limited-import-only-retry": "node tools/limited-import-only-retry.js",
+    "dry-run": "node legacy/run.js --dry-run",
+    "controlled-dry-run": "bash legacy/run-controlled.sh dry-run",
+    "controlled-live": "bash legacy/run-controlled.sh live",
+    "live": "node legacy/run.js --live"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "playwright": "1.57.0"
+  }
+}

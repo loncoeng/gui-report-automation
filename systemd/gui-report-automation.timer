@@ -1,0 +1,11 @@
+[Unit]
+Description=GUI Report Automation availability retry timer
+
+[Timer]
+OnCalendar=*-*-01,03..31 06:30:00 Asia/Tokyo
+OnCalendar=*-*-01,03..31 07..09:00:00 Asia/Tokyo
+OnCalendar=*-*-01,03..31 07..09:30:00 Asia/Tokyo
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,45 @@
+# Dependencies and local tooling
+node_modules/
+.DS_Store
+.env
+.env.*
+!.env.example
+npm-debug.log*
+
+# Runtime data and evidence (never commit operational/user data)
+logs/
+state/
+runs/
+quarantine/
+artifacts/
+downloads/
+*.csv
+*.crdownload
+*.part
+*.jsonl
+*.xwd
+
+# Chrome profiles, cookies, and browser session data
+chrome-data/
+chrome-user-data/
+user-data-dir/
+Default/
+Profile */
+
+# Local secret overrides
+config/*.local.json
+config/*secret*.json
+config/*credentials*.json
+credentials/
+**/credentials/
+*.pem
+*.key
+*service-account*.json
+*sheets-reader*.json
+
+# Deployment bundles and temporary backups
+*.tar.gz
+*.tgz
+*.zip
+*.bak
+*.tmp
