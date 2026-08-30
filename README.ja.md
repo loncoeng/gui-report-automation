@@ -100,5 +100,4 @@ Node.js 20+ / Playwright（診断用途のみ）/ systemd timer / Google Sheets 
 
 MIT License. 詳細は [LICENSE](LICENSE) を参照してください。
 
-本リポジトリは、現在も本番稼働しているシステムをもとに、
-委託元の情報を除いて再構成した公開版です。
+委託元の承諾を得て、本番稼働中のシステムを匿名化した公開版です。

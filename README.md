@@ -127,5 +127,5 @@ Google Compute Engine / xdotool, xclip, wmctrl
 
 MIT. See [LICENSE](LICENSE).
 
-A public edition rebuilt from a system that is currently running in production,
-with information identifying the client removed.
+A sanitised, public edition of a system still running in production, published
+with the client's permission.
