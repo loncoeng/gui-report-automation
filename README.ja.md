@@ -8,9 +8,6 @@ Linux VM 上で、**人間が開いたままにしている既存の Chrome セ�
 
 ブラウザを自前で起動せず、ログイン状態・Cookie・多要素認証済みのセッションをそのまま利用します。認証情報を一切保存しないまま、管理画面からの CSV 取得 → Google Drive へのアップロード → GAS による集計 → チャット通知 → 後片付けまでを、失敗時に安全側へ倒れる形で実行します。
 
-> Scheduled automation that borrows a long-running, human-owned Chrome session on a Linux VM
-> to collect, aggregate and report daily metrics — without storing any credentials.
-
 ---
 
 ## 何が難しいか
