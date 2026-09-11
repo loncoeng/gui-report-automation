@@ -37,6 +37,9 @@ test("address-bar focus stops before any text input when the copied selection is
   runtime.copyFocusedSelection = async () => "t";
   runtime.run = async (command, args) => {
     commands.push([command, args]);
+    if (command === "xdotool" && args[0] === "getwindowgeometry") {
+      return { stdout: "WIDTH=1024\nHEIGHT=700", stderr: "" };
+    }
     return { stdout: "", stderr: "" };
   };
 
@@ -256,6 +259,69 @@ test("resident tab refresh refuses an unchanged document", async () => {
   );
 });
 
+test("import Sheets refresh uses only F5 after verifying the active window", async () => {
+  const events = [];
+  const commands = [];
+  const runtime = new ExistingChromeRuntime({
+    root: "/tmp",
+    log: async (event, details) => events.push({ event, details })
+  });
+  runtime.activateWindow = async (windowId) => commands.push(["activate", windowId]);
+  const pageStates = [
+    { url: "https://docs.google.com/spreadsheets/d/import/edit", readyState: "complete", timeOrigin: 1000 },
+    { url: "https://docs.google.com/spreadsheets/d/import/edit", readyState: "complete", timeOrigin: 2000 }
+  ];
+  runtime.typeAddressJavascript = async () => pageStates.shift();
+  runtime.run = async (command, args) => {
+    commands.push([command, args]);
+    if (command === "xdotool" && args[0] === "getactivewindow") {
+      return { stdout: String(Number("0x1234")), stderr: "" };
+    }
+    return { stdout: "", stderr: "" };
+  };
+
+  const result = await runtime.reloadSheetsTabWithVerifiedF5("0x1234", {
+    expectedUrlPrefix: "https://docs.google.com/spreadsheets/d/import/",
+    timeoutMs: 20,
+    pollIntervalMs: 1
+  });
+
+  assert.equal(result.method, "F5");
+  assert.equal(result.afterTimeOrigin, 2000);
+  assert.equal(commands.some(([, args]) => args?.at(-1) === "ctrl+r"), false);
+  assert.equal(commands.some(([, args]) => args?.at(-1) === "F5"), true);
+  assert.equal(events.some(({ event }) => event === "resident_reload_active_window_verified"), true);
+  assert.equal(events.some(({ event }) => event === "resident_sheets_verified_f5_reload_completed"), true);
+});
+
+test("F5 fallback stops before sending the key when a different window is active", async () => {
+  const commands = [];
+  const runtime = new ExistingChromeRuntime({ root: "/tmp", log: async () => {} });
+  runtime.activateWindow = async () => {};
+  runtime.typeAddressJavascript = async () => ({
+    url: "https://docs.google.com/spreadsheets/d/import/edit",
+    readyState: "complete",
+    timeOrigin: 1000
+  });
+  runtime.run = async (command, args) => {
+    commands.push([command, args]);
+    if (command === "xdotool" && args[0] === "getactivewindow") {
+      return { stdout: String(Number("0x9999")), stderr: "" };
+    }
+    return { stdout: "", stderr: "" };
+  };
+
+  await assert.rejects(
+    runtime.reloadTab("0x1234", {
+      expectedUrlPrefix: "https://docs.google.com/spreadsheets/d/import/",
+      reloadKey: "F5",
+      verifyActiveWindow: true
+    }),
+    /Reload active-window safety stop/
+  );
+  assert.equal(commands.some(([, args]) => args?.at(-1) === "F5"), false);
+});
+
 test("date controls support the React Select controls used by 対象管理画面", async () => {
   const source = await readFile(new URL("../src/gui-runtime.js", import.meta.url), "utf8");
   assert.match(source, /-singleValue/);
@@ -290,6 +356,80 @@ test("React date selection uses a real pointer and verifies the final value", as
   assert.deepEqual(selected, { label: "Day", value: "13", native: false, optionCoordinates: { x: 200, y: 500 } });
   assert.deepEqual(commands[0], ["click", "admin-window", { x: 120, y: 340 }]);
   assert.deepEqual(commands[1], ["click", "admin-window", { x: 200, y: 500 }]);
+});
+
+test("React month selection uses bounded keyboard navigation and verifies the result", async () => {
+  const runtime = new ExistingChromeRuntime({ root: "/tmp", log: async () => {} });
+  const commands = [];
+  const pageResults = [
+    { done: false, native: false, currentValue: "9", coordinates: { x: 120, y: 340 } },
+    { selected: true, actual: "8" }
+  ];
+  runtime.typeAddressJavascript = async () => pageResults.shift();
+  runtime.numericOptionCoordinatesByScrolling = async () => {
+    throw new Error("month selection must not depend on OCR");
+  };
+  runtime.clickWindowCoordinates = async () => {};
+  runtime.activateWindow = async () => {};
+  runtime.run = async (command, args) => {
+    commands.push([command, args]);
+    return { stdout: "", stderr: "" };
+  };
+
+  const selected = await runtime.setSelectFollowingLabel("admin-window", "Month", "08");
+
+  assert.equal(selected.label, "Month");
+  assert.equal(selected.value, "8");
+  assert.equal(selected.optionCoordinates, null);
+  assert.deepEqual(commands[0], ["xdotool", ["key", "--clearmodifiers", "Home"]]);
+  assert.equal(
+    commands.filter(([, args]) => args.at(-1) === "Down").length,
+    7
+  );
+  assert.deepEqual(commands.at(-1), ["xdotool", ["key", "--clearmodifiers", "Return"]]);
+});
+
+test("numeric date scrolling uses wheel-up for an earlier target", async () => {
+  const events = [];
+  const commands = [];
+  const runtime = new ExistingChromeRuntime({
+    root: "/tmp",
+    log: async (event, details) => events.push({ event, details })
+  });
+  let scans = 0;
+  runtime.ocrNumericOptionCoordinates = async () => {
+    scans += 1;
+    if (scans === 1) throw new Error("Date option OCR safety stop: expected one 8 near 379,560; matches=0");
+    return { x: 379, y: 520 };
+  };
+  runtime.activateWindow = async () => {};
+  runtime.run = async (command, args) => {
+    commands.push([command, args]);
+    return { stdout: "", stderr: "" };
+  };
+
+  const result = await runtime.numericOptionCoordinatesByScrolling(
+    "admin-window",
+    "8",
+    { x: 379, y: 560 },
+    2,
+    "up",
+    1
+  );
+
+  assert.deepEqual(result, { x: 379, y: 520 });
+  assert.equal(commands.filter(([command, args]) => command === "xdotool" && args[0] === "click" && args[1] === "4").length, 1);
+  assert.ok(events.some(({ event, details }) =>
+    event === "resident_date_option_scroll" &&
+    details.direction === "up" &&
+    details.menuPlacement === "top" &&
+    details.wheelNotches === 1
+  ));
+  assert.ok(commands.some(([command, args]) =>
+    command === "xdotool" &&
+    args[0] === "mousemove" &&
+    args.at(-1) === "490"
+  ));
 });
 
 test("long React date menus scroll slowly until the exact target becomes visible", async () => {
@@ -353,6 +493,7 @@ test("live runs verify the target date before creating state or downloading CSV 
   assert.ok(monthlyDownload > beginState);
   assert.match(source, /resident_run_skipped_existing_state/);
   assert.match(source, /resident_report_date_available/);
+  assert.match(source, /resident_download_date_controls_reverified/);
   assert.match(source, /resident_admin_refresh_started/);
   assert.match(source, /resident_admin_refresh_ok/);
   assert.match(source, /forceReload: true/);
@@ -380,11 +521,12 @@ test("timer retries inspect existing state before initializing or focusing Chrom
   assert.match(source, /chromeInitialized: false/);
 });
 
-test("recurring timer retries availability every 30 minutes and still skips each month day 2", async () => {
+test("recurring timer runs at 06:30, 07:30, and 08:30 while skipping each month day 2", async () => {
   const source = await readFile(new URL("../systemd/gui-report-automation.timer", import.meta.url), "utf8");
   assert.match(source, /OnCalendar=\*-\*-01,03\.\.31 06:30:00 Asia\/Tokyo/);
-  assert.match(source, /OnCalendar=\*-\*-01,03\.\.31 07\.\.09:00:00 Asia\/Tokyo/);
-  assert.match(source, /OnCalendar=\*-\*-01,03\.\.31 07\.\.09:30:00 Asia\/Tokyo/);
+  assert.match(source, /OnCalendar=\*-\*-01,03\.\.31 07:30:00 Asia\/Tokyo/);
+  assert.match(source, /OnCalendar=\*-\*-01,03\.\.31 08:30:00 Asia\/Tokyo/);
+  assert.doesNotMatch(source, /09:30:00/);
   assert.match(source, /Persistent=false/);
 });
 
@@ -573,9 +715,35 @@ test("a visible dark Sheets notification is cleared by reloading only the existi
   assert.match(runtimeSource, /\[role=alert\],\[role=status\],\[class\*=snackbar\],\[class\*=toast\]/);
   assert.match(liveSource, /resident_sheets_blocking_notification_detected/);
   assert.match(liveSource, /resident_sheets_blocking_notification_cleared_by_reload/);
-  assert.match(liveSource, /reloadTab\(activeTab\.windowId, \{ expectedUrlPrefix \}\)/);
+  assert.match(liveSource, /reloadSheetsTabWithVerifiedF5\(activeTab\.windowId, \{ expectedUrlPrefix \}\)/);
+  assert.match(liveSource, /notification remained after verified reload/);
+  assert.match(liveSource, /waitForVisibleExactText\(activeTab\.windowId, sheet\.menu\)/);
   assert.match(liveSource, /after-menu-recognition-failure/);
   assert.equal(liveSource.includes("openTab("), false);
+});
+
+test("custom menu readiness waits for delayed Apps Script injection after reload", async () => {
+  const events = [];
+  const runtime = new ExistingChromeRuntime({
+    root: "/tmp",
+    log: async (event, details) => events.push({ event, details })
+  });
+  let attempts = 0;
+  runtime.exactTextWindowCoordinates = async () => {
+    attempts += 1;
+    if (attempts < 3) throw new Error("expected one visible exact control 集計用, found 0");
+    return { x: 12, y: 34 };
+  };
+
+  const coordinates = await runtime.waitForVisibleExactText("window", "集計用", {
+    timeoutMs: 100,
+    pollMs: 1
+  });
+
+  assert.deepEqual(coordinates, { x: 12, y: 34 });
+  assert.equal(attempts, 3);
+  assert.equal(events.filter(({ event }) => event === "resident_exact_text_not_ready").length, 2);
+  assert.equal(events.at(-1).event, "resident_exact_text_ready");
 });
 
 test("GAS actions reuse a sheet tab whose configured gid was already verified", async () => {
@@ -1016,6 +1184,16 @@ test("main import dialog resume and continuation cannot rerun main action one", 
   assert.match(packageSource, /resident-resume-after-main-import-confirmed/);
 });
 
+test("post-main-import resume accepts only the exact pre-Chatwork menu failure with A1 evidence", async () => {
+  const source = await readFile(new URL("../src/gui-live.js", import.meta.url), "utf8");
+  assert.match(source, /knownPreMainChatworkMenuFailure/);
+  assert.match(source, /gas_ready:main:②Chatworkに報告/);
+  assert.match(source, /expected one visible exact control 集計用, found 0/);
+  assert.match(source, /completedGasActions\?\.includes\("main:①データインポート"\)/);
+  assert.match(source, /mainImportSheetVerification\?\.verified === true/);
+  assert.match(source, /a1-verified-before-main-chatwork-menu-failure/);
+});
+
 test("main import uses the keyless A1 execution date and recovers without a second GAS click", async () => {
   const liveSource = await readFile(new URL("../src/gui-live.js", import.meta.url), "utf8");
   const liveConfig = await readFile(new URL("../config/automation.live.json", import.meta.url), "utf8");
@@ -1061,10 +1239,28 @@ test("known GAS warnings and observable Drive cleanup continue without blind ret
 
 test("API-proven import completion clears only a remaining modal and notification without blocking", async () => {
   const liveSource = await readFile(new URL("../src/gui-live.js", import.meta.url), "utf8");
+  const normalImportStart = liveSource.indexOf(
+    'await runGasAction(sheetTabs.get("import"), importSheet, "データインポート", {'
+  );
+  const normalImportVerification = liveSource.indexOf(
+    'const verification = await verifyImportOutput(sheetTabs.get("import"), importSheet, "after-confirmed-dialog")',
+    normalImportStart
+  );
+  const normalImportCleanup = liveSource.indexOf(
+    "const importUiCleanup = await reconcileImportUiAfterApiVerification(",
+    normalImportVerification
+  );
   assert.match(liveSource, /reconcileImportUiAfterApiVerification/);
+  assert.match(liveSource, /deferPostDialogNotificationCleanup: true/);
+  assert.match(liveSource, /resident_post_gas_notification_cleanup_deferred/);
+  assert.ok(normalImportStart >= 0);
+  assert.ok(normalImportVerification > normalImportStart);
+  assert.ok(normalImportCleanup > normalImportVerification);
   assert.match(liveSource, /resident_import_api_verified_modal_confirmation_sent/);
   assert.match(liveSource, /api-verified-default-button-once/);
   assert.match(liveSource, /resident_import_post_api_notification_detected/);
+  assert.match(liveSource, /reloadSheetsTabWithVerifiedF5/);
+  assert.match(liveSource, /Import notification remained after verified reload/);
   assert.match(liveSource, /recordNonBlockingWarning\("import-ui-cleanup"/);
   assert.match(liveSource, /const addressBarAvailable = await runtime\.probeAddressBarAvailableWithoutEscape/);
   assert.match(liveSource, /if \(!addressBarAvailable\)/);
@@ -1077,6 +1273,48 @@ test("systemd service serializes cross-manager execution with flock", async () =
   assert.match(source, /SuccessExitStatus=75/);
 });
 
+test("power-cycle mode starts only on report days and shuts down only from completed evidence", async () => {
+  const startScript = await readFile(new URL("../start-chrome.sh", import.meta.url), "utf8");
+  const shutdownScript = await readFile(new URL("../scripts/shutdown-if-success.sh", import.meta.url), "utf8");
+  const shutdownService = await readFile(
+    new URL("../systemd/gui-report-automation-shutdown-watch.service", import.meta.url),
+    "utf8"
+  );
+  const shutdownTimer = await readFile(
+    new URL("../systemd/gui-report-automation-shutdown-watch.timer", import.meta.url),
+    "utf8"
+  );
+  const desktopSession = await readFile(
+    new URL("../systemd/chrome-remote-desktop-session", import.meta.url),
+    "utf8"
+  );
+  const scheduleScript = await readFile(
+    new URL("../scripts/configure-instance-start-schedule.sh", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(startScript, /START_CHROME_SKIPPED existing_browser=true/);
+  assert.match(startScript, /START_CHROME_DRIVE_REFRESH_SENT/);
+  assert.match(startScript, /active-window-mismatch/);
+  assert.match(startScript, /new-workspace-window-not-unique/);
+  assert.match(startScript, /xdotool key --clearmodifiers F5/);
+  assert.equal((startScript.match(/drive\.google\.com\/drive\/folders\//g) || []).length, 1);
+  assert.equal((startScript.match(/docs\.google\.com\/spreadsheets\/d\//g) || []).length, 3);
+  assert.match(shutdownScript, /REPORT_AUTOMATION_ALLOW_POWEROFF/);
+  assert.match(shutdownScript, /state\.status !== "completed"/);
+  assert.match(shutdownScript, /state\.stage !== "completed"/);
+  assert.match(shutdownScript, /\[\[ -e "\$run_lock" \]\]/);
+  assert.match(shutdownScript, /run-lock-held/);
+  assert.match(shutdownScript, /chrome-did-not-exit-cleanly/);
+  assert.match(shutdownScript, /\/usr\/sbin\/poweroff/);
+  assert.match(shutdownService, /REPORT_AUTOMATION_ALLOW_POWEROFF=1/);
+  assert.match(shutdownTimer, /^OnBootSec=10min$/m);
+  assert.match(shutdownTimer, /^OnUnitActiveSec=2min$/m);
+  assert.equal(desktopSession.trim(), "exec /etc/X11/Xsession /usr/bin/xfce4-session");
+  assert.match(scheduleScript, /0 6 1,3-31 \* \*/);
+  assert.match(scheduleScript, /--timezone="Asia\/Tokyo"/);
+});
+
 test("post-import resume skips the completed import GAS", async () => {
   const liveSource = await readFile(new URL("../src/gui-live.js", import.meta.url), "utf8");
   const resumeSource = await readFile(new URL("../src/resume-import-dialog.js", import.meta.url), "utf8");
@@ -1086,6 +1324,11 @@ test("post-import resume skips the completed import GAS", async () => {
   assert.match(liveSource, /knownRepeatedVerificationFailure/);
   assert.match(liveSource, /resident_import_sheet_verification_reused/);
   assert.match(liveSource, /recorded-visible-sheet-date/);
+  assert.match(liveSource, /const apiVerifiableUiFailures = new Set/);
+  assert.match(liveSource, /"Timed out waiting for the GAS result dialog"/);
+  assert.match(liveSource, /"GAS dialog did not disappear after clicking OK"/);
+  assert.match(liveSource, /after-dialog-dismissal-failure/);
+  assert.match(liveSource, /resident_import_ui_failure_accepted_by_sheet_verification/);
   assert.match(liveSource, /resumedAfterImportDialogAt/);
   assert.match(resumeSource, /preserveActiveDialog: true/);
   assert.match(resumeSource, /Timed out waiting for the GAS result dialog/);
@@ -1120,6 +1363,19 @@ test("scheduled resident workflow requires existing Chrome tabs and never create
   assert.match(liveSource, /resident mode will not create or navigate a tab/);
   assert.doesNotMatch(preflightSource, /startChromeIfNeeded/);
   assert.match(preflightSource, /preflight will not start Chrome or create profiles/);
+});
+
+test("sheet preflight reloads one verified existing tab only when its body and GAS menu stay absent", async () => {
+  const source = await readFile(new URL("../src/gui-live.js", import.meta.url), "utf8");
+  assert.match(source, /const waitForSheetPageMarkers/);
+  assert.match(source, /timeoutMs: Math\.min\(sheetReadyTimeoutMs, 60_000\)/);
+  assert.match(source, /current\.url\.startsWith\(expectedUrlPrefix\)/);
+  assert.match(source, /resident_sheet_preflight_reload_recovery_started/);
+  assert.match(source, /reloadSheetsTabWithVerifiedF5\(tab\.windowId, \{ expectedUrlPrefix \}\)/);
+  assert.match(source, /timeoutMs: Math\.min\(sheetReadyTimeoutMs, 180_000\)/);
+  assert.match(source, /resident_sheet_preflight_reload_recovery_completed/);
+  assert.match(source, /await waitForSheetPageMarkers\(tab, sheet\)/);
+  assert.equal(source.includes("openTab("), false);
 });
 
 test("import dialog resume locates the approved spreadsheet by ID before using a title fallback", async () => {

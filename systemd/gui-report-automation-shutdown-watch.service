@@ -1,0 +1,12 @@
+[Unit]
+Description=Power off gui-report-automation only after a completed daily run
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=REPORT_AUTOMATION_ALLOW_POWEROFF=1
+Environment=AUTOMATION_HOME=/home/automation/gui-report-automation
+Environment=AUTOMATION_USER=automation
+Environment=DISPLAY=:20
+Environment=XAUTHORITY=/home/automation/.Xauthority
+ExecStart=/home/automation/gui-report-automation/app/scripts/shutdown-if-success.sh

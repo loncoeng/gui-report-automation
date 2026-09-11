@@ -301,7 +301,14 @@ export class ExistingChromeRuntime {
 
   async reloadTab(
     windowId,
-    { timeoutMs = 120_000, pollIntervalMs = 2_000, forceReload = false, expectedUrlPrefix = null } = {}
+    {
+      timeoutMs = 120_000,
+      pollIntervalMs = 2_000,
+      forceReload = false,
+      expectedUrlPrefix = null,
+      reloadKey = null,
+      verifyActiveWindow = false
+    } = {}
   ) {
     const before = await this.typeAddressJavascript(
       windowId,
@@ -311,7 +318,15 @@ export class ExistingChromeRuntime {
       throw new Error(`Reload target safety stop: expected ${expectedUrlPrefix}, found ${before.url}`);
     }
     await this.activateWindow(windowId);
-    const method = forceReload ? "ctrl+shift+r" : "ctrl+r";
+    if (verifyActiveWindow) {
+      const active = normalizeWindowId((await this.run("xdotool", ["getactivewindow"])).stdout);
+      const expected = normalizeWindowId(windowId);
+      if (active !== expected) {
+        throw new Error(`Reload active-window safety stop: expected ${expected}, found ${active}`);
+      }
+      await this.log("resident_reload_active_window_verified", { windowId: expected });
+    }
+    const method = reloadKey || (forceReload ? "ctrl+shift+r" : "ctrl+r");
     await this.run("xdotool", ["key", "--clearmodifiers", method]);
     await this.log("resident_tab_reload_requested", {
       windowId,
@@ -353,6 +368,22 @@ export class ExistingChromeRuntime {
       `readyState=${lastState?.readyState || "unavailable"}, ` +
       `beforeTimeOrigin=${before.timeOrigin}, afterTimeOrigin=${lastState?.timeOrigin || "unavailable"}`
     );
+  }
+
+  async reloadSheetsTabWithVerifiedF5(
+    windowId,
+    { expectedUrlPrefix, timeoutMs = 120_000, pollIntervalMs = 2_000 } = {}
+  ) {
+    await this.log("resident_sheets_verified_f5_reload_started", { windowId, expectedUrlPrefix });
+    const result = await this.reloadTab(windowId, {
+      expectedUrlPrefix,
+      timeoutMs,
+      pollIntervalMs,
+      reloadKey: "F5",
+      verifyActiveWindow: true
+    });
+    await this.log("resident_sheets_verified_f5_reload_completed", result);
+    return result;
   }
 
   async navigateTabByPageLocation(windowId, url, matches, timeoutMs = 120_000) {
@@ -518,6 +549,24 @@ export class ExistingChromeRuntime {
     return this.typeAddressJavascript(windowId, `async()=>{const d=s=>decodeURIComponent(escape(atob(s))),q=d('${encoded}'),v=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'},all=[...document.querySelectorAll('button,[role=button],[role=menuitem],a,div,span')].filter(e=>v(e)&&(e.innerText||e.textContent||'').trim()===q),rank=e=>['BUTTON','A'].includes(e.tagName)||e.hasAttribute('role')?0:1,best=Math.min(...all.map(rank)),top=all.filter(e=>rank(e)===best),unique=[...new Map(top.map(e=>{const r=e.getBoundingClientRect();return[[Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height)].join(':'),e]})).values()];if(unique.length!==1)throw new Error('expected one visible exact control '+q+', found '+unique.length);const r=unique[0].getBoundingClientRect(),dy=Math.max(0,outerHeight-innerHeight);return{x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2+dy)}}`);
   }
 
+  async waitForVisibleExactText(windowId, label, { timeoutMs = 180_000, pollMs = 5_000 } = {}) {
+    const startedAt = Date.now();
+    let attempt = 0;
+    while (Date.now() - startedAt < timeoutMs) {
+      attempt += 1;
+      try {
+        const coordinates = await this.exactTextWindowCoordinates(windowId, label);
+        await this.log("resident_exact_text_ready", { label, attempt });
+        return coordinates;
+      } catch (error) {
+        if (!/expected one visible exact control .* found 0/.test(String(error))) throw error;
+        await this.log("resident_exact_text_not_ready", { label, attempt });
+        await delay(pollMs);
+      }
+    }
+    throw new Error(`Timed out waiting for exact visible control: ${label}`);
+  }
+
   async openSingleActionCustomMenu(windowId, menuLabel, { settleMs = 1_500 } = {}) {
     const menuCoordinates = await this.exactTextWindowCoordinates(windowId, menuLabel);
     await this.clickWindowCoordinates(windowId, menuCoordinates);
@@ -649,19 +698,54 @@ export class ExistingChromeRuntime {
   async setSelectFollowingLabel(windowId, label, value) {
     const encodedLabel = Buffer.from(label, "utf8").toString("base64");
     const encodedValue = Buffer.from(String(Number(value)), "utf8").toString("base64");
-    const opened = await this.typeAddressJavascript(windowId, `async()=>{const d=s=>decodeURIComponent(escape(atob(s))),l=d('${encodedLabel}'),v=d('${encodedValue}'),vis=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'},n=[...document.querySelectorAll('label,span,div')].find(e=>vis(e)&&(e.innerText||e.textContent||'').trim()===l);if(!n)throw new Error('date label not found '+l);const p=n.parentElement,s=p&&p.querySelector('select');if(s){const o=[...s.options].find(x=>x.label===v||x.value===v||Number(x.label)===Number(v));if(!o)throw new Error('option '+v+' not found after '+l);s.value=o.value;s.dispatchEvent(new Event('input',{bubbles:true}));s.dispatchEvent(new Event('change',{bubbles:true}));return{done:true,native:true}}const cur=p&&p.querySelector('[class*="-singleValue"]'),c=p&&(p.querySelector('[class*="-control"]')||p.querySelector('input'));if(!c)throw new Error('date control not found after '+l);if(cur&&Number((cur.innerText||cur.textContent||'').trim())===Number(v))return{done:true,native:false};const r=c.getBoundingClientRect(),dy=Math.max(0,outerHeight-innerHeight);return{done:false,native:false,coordinates:{x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2+dy)}}}`);
+    const opened = await this.typeAddressJavascript(windowId, `async()=>{const d=s=>decodeURIComponent(escape(atob(s))),l=d('${encodedLabel}'),v=d('${encodedValue}'),vis=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'},n=[...document.querySelectorAll('label,span,div')].find(e=>vis(e)&&(e.innerText||e.textContent||'').trim()===l);if(!n)throw new Error('date label not found '+l);const p=n.parentElement,s=p&&p.querySelector('select');if(s){const o=[...s.options].find(x=>x.label===v||x.value===v||Number(x.label)===Number(v));if(!o)throw new Error('option '+v+' not found after '+l);s.value=o.value;s.dispatchEvent(new Event('input',{bubbles:true}));s.dispatchEvent(new Event('change',{bubbles:true}));return{done:true,native:true}}const cur=p&&p.querySelector('[class*="-singleValue"]'),c=p&&(p.querySelector('[class*="-control"]')||p.querySelector('input'));if(!c)throw new Error('date control not found after '+l);const currentValue=String(cur?.innerText||cur?.textContent||cur?.value||'').trim();if(cur&&Number(currentValue)===Number(v))return{done:true,native:false};const r=c.getBoundingClientRect(),dy=Math.max(0,outerHeight-innerHeight);return{done:false,native:false,currentValue,coordinates:{x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2+dy)}}}`);
     if (opened.done) return { label, value: String(Number(value)), native: opened.native };
     await this.clickWindowCoordinates(windowId, opened.coordinates);
     await delay(1_500);
-    // React Select exposes its rendered options while the menu is open. The
-    // address bar cannot be used here because focusing it closes the menu, so
-    // locate the exact approved numeric option with OCR and click it directly.
-    const optionCoordinates = await this.numericOptionCoordinatesByScrolling(
-      windowId,
-      String(Number(value)),
-      opened.coordinates
-    );
-    await this.clickWindowCoordinates(windowId, optionCoordinates);
+    const currentNumber = Number(opened.currentValue);
+    const targetNumber = Number(value);
+    let optionCoordinates = null;
+    if (label === "Month" && Number.isInteger(currentNumber) && Number.isInteger(targetNumber)) {
+      // Month options are ordered 1..12. On the first day of a month the
+      // previous month can be outside the small upward-opening menu and its
+      // one-character label is unreliable under OCR. React Select does not
+      // initially keyboard-focus the current value: ArrowUp from an unfocused
+      // menu jumps to 12. Anchor on the first option with Home, then move to
+      // the absolute target. The exact value is verified below before Download.
+      if (currentNumber < 1 || currentNumber > 12 || targetNumber < 1 || targetNumber > 12) {
+        throw new Error(
+          `Month keyboard selection safety stop: current=${currentNumber}, target=${targetNumber}`
+        );
+      }
+      await this.activateWindow(windowId);
+      await this.run("xdotool", ["key", "--clearmodifiers", "Home"]);
+      await delay(300);
+      for (let step = 1; step < targetNumber; step += 1) {
+        await this.run("xdotool", ["key", "--clearmodifiers", "Down"]);
+        await delay(180);
+      }
+      await this.run("xdotool", ["key", "--clearmodifiers", "Return"]);
+      await this.log("resident_month_option_keyboard", {
+        current: currentNumber,
+        target: targetNumber,
+        anchor: "Home",
+        key: "Down",
+        steps: targetNumber - 1
+      });
+    } else {
+      // React Select exposes its rendered options while the menu is open. The
+      // address bar cannot be used here because focusing it closes the menu,
+      // so locate the exact approved numeric option with OCR and click it.
+      const scrollDirection = Number.isFinite(currentNumber) && targetNumber < currentNumber ? "up" : "down";
+      optionCoordinates = await this.numericOptionCoordinatesByScrolling(
+        windowId,
+        String(Number(value)),
+        opened.coordinates,
+        12,
+        scrollDirection
+      );
+      await this.clickWindowCoordinates(windowId, optionCoordinates);
+    }
     await delay(2_000);
     const verified = await this.typeAddressJavascript(windowId, `async()=>{const d=s=>decodeURIComponent(escape(atob(s))),l=d('${encodedLabel}'),v=d('${encodedValue}'),vis=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'},n=[...document.querySelectorAll('label,span,div')].find(e=>vis(e)&&(e.innerText||e.textContent||'').trim()===l),p=n&&n.parentElement,s=p&&p.querySelector('select'),cur=p&&(p.querySelector('[class*="-singleValue"]')||p.querySelector('input'));if(!n||!cur&&!s)throw new Error('date control not found after '+l);const actual=s?String(s.options[s.selectedIndex]?.label||s.value||''):String(cur.innerText||cur.textContent||cur.value||'').trim();return{selected:Number(actual)===Number(v),actual}}`);
     if (!verified.selected) {
@@ -670,7 +754,20 @@ export class ExistingChromeRuntime {
     return { label, value: String(Number(value)), native: false, optionCoordinates };
   }
 
-  async numericOptionCoordinatesByScrolling(windowId, value, controlCoordinates, maxScans = 12) {
+  async numericOptionCoordinatesByScrolling(
+    windowId,
+    value,
+    controlCoordinates,
+    maxScans = 12,
+    scrollDirection = "down",
+    wheelNotches = 3
+  ) {
+    if (!["up", "down"].includes(scrollDirection)) {
+      throw new Error(`Date option scroll safety stop: invalid direction ${scrollDirection}`);
+    }
+    if (!Number.isInteger(wheelNotches) || wheelNotches < 1 || wheelNotches > 3) {
+      throw new Error(`Date option scroll safety stop: invalid wheel notches ${wheelNotches}`);
+    }
     const target = String(Number(value));
     let lastZeroMatchError = null;
     for (let scan = 0; scan < maxScans; scan += 1) {
@@ -685,21 +782,38 @@ export class ExistingChromeRuntime {
       }
 
       if (scan === maxScans - 1) break;
-      // React Select only renders the visible portion of a long day list. Keep
-      // the pointer inside the menu and move it slowly by three rows before
-      // scanning again. Wheel scrolling does not select or submit an option.
-      const menuPoint = { x: controlCoordinates.x, y: controlCoordinates.y + 70 };
+      // React Select only renders the visible portion of its list. Scroll
+      // toward the requested value based on the value that was selected when
+      // the menu opened. This matters on the first day of a month, when 17
+      // Admin defaults to the new month and the report target is the previous
+      // month. Wheel scrolling does not select or submit an option.
       await this.activateWindow(windowId);
+      const { stdout: geometryText } = await this.run("xdotool", [
+        "getwindowgeometry", "--shell", windowId
+      ]);
+      const windowHeight = Number(geometryText.match(/^HEIGHT=(\d+)$/m)?.[1] || 1080);
+      const opensUpward = controlCoordinates.y > windowHeight / 2;
+      const menuPoint = {
+        x: controlCoordinates.x,
+        y: controlCoordinates.y + (opensUpward ? -70 : 70)
+      };
       await this.run("xdotool", [
         "mousemove", "--window", windowId,
         String(menuPoint.x), String(menuPoint.y)
       ]);
-      for (let notch = 0; notch < 3; notch += 1) {
-        await this.run("xdotool", ["click", "5"]);
+      const wheelButton = scrollDirection === "up" ? "4" : "5";
+      for (let notch = 0; notch < wheelNotches; notch += 1) {
+        await this.run("xdotool", ["click", wheelButton]);
         await delay(450);
       }
       await delay(1_200);
-      await this.log("resident_date_option_scroll", { target, completedScan: scan + 1 });
+      await this.log("resident_date_option_scroll", {
+        target,
+        direction: scrollDirection,
+        menuPlacement: opensUpward ? "top" : "bottom",
+        wheelNotches,
+        completedScan: scan + 1
+      });
     }
     throw new Error(
       `Date option scroll safety stop: ${target} was not uniquely visible after ${maxScans} scans; ` +
@@ -1190,10 +1304,16 @@ export class ExistingChromeRuntime {
       // the report table. Crop only the React Select menu area, then enlarge
       // and increase contrast before OCR. Coordinates are mapped back to the
       // original window after recognition.
+      const opensUpward = controlCoordinates.y > windowHeight / 2;
       const cropLeft = Math.max(0, Math.round(controlCoordinates.x - 180));
-      const cropTop = Math.max(0, Math.round(controlCoordinates.y - 45));
+      const cropTop = Math.max(0, Math.round(
+        opensUpward ? controlCoordinates.y - 430 : controlCoordinates.y - 45
+      ));
       const cropWidth = Math.max(1, Math.min(360, windowWidth - cropLeft));
-      const cropHeight = Math.max(1, Math.min(430, windowHeight - cropTop));
+      const desiredCropBottom = opensUpward
+        ? Math.min(windowHeight, Math.round(controlCoordinates.y + 45))
+        : Math.min(windowHeight, Math.round(controlCoordinates.y + 430));
+      const cropHeight = Math.max(1, desiredCropBottom - cropTop);
       const scale = 4;
       await this.run("convert", [
         xwdPath,

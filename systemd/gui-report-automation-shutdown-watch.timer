@@ -1,0 +1,12 @@
+[Unit]
+Description=Check whether gui-report-automation can shut down safely
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=gui-report-automation-shutdown-watch.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

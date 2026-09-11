@@ -67,6 +67,28 @@ verification is requested, the run is recorded as failed and stops.
 flag are explicitly enabled. The default `config/automation.json` has them all
 set to `false`.
 
+**Power off only once it is provably safe to.** Once the daily run is done the VM has
+nothing left to do — but **cutting power mid-run leaves no record that anything stopped
+partway.** So a shutdown needs all six of these to hold:
+
+| Condition | Why it blocks a shutdown |
+|---|---|
+| `REPORT_AUTOMATION_ALLOW_POWEROFF=1` | Nothing gets powered off where it was never enabled |
+| Not the 2nd of the month | Month-rollover runs follow a different path |
+| Between 06:30 and 10:30 JST | Running outside that window means the situation is not understood |
+| The state file reads `completed` | The reporting date actually finished |
+| The run lock is free | No other run is in progress |
+| Chrome exited cleanly | The session was closed without breaking it |
+
+**Any one of them missing leaves the machine up.** It is the same rule as everywhere
+else here: when you cannot tell, stop. The lock is never created as root — it is only
+inspected when it already exists, so **a check cannot manufacture the production lock it
+was meant to observe.**
+
+Starting up is left to a GCE instance schedule
+(`scripts/configure-instance-start-schedule.sh`). **Only the stopping is hard; starting
+is a clock.**
+
 ## Layout
 
 ```
@@ -81,7 +103,12 @@ src/        the current implementation
 tools/      diagnostic and partial-run harnesses, outside the production path
 legacy/     the Playwright approach that was tried and rejected, and why
 config/     defaults / production / one-shot example
-systemd/    timer units
+scripts/    operational scripts
+  shutdown-if-success.sh                powers the VM off only on all six conditions
+  configure-instance-start-schedule.sh  the GCE-side start schedule
+  install-power-cycle.sh                wires the above into systemd
+  check-syntax.mjs                      syntax check for JS and shell
+systemd/    timer units and the shutdown check
 test/       unit tests (node:test)
 ```
 

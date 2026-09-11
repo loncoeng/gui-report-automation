@@ -184,9 +184,13 @@ const pageHasMarkers = async (tab, markers) => {
   return { ...summary, all: summary.markers.every(Boolean) };
 };
 
-const waitForPageMarkers = async (tab, key, markers) => {
+const waitForPageMarkers = async (
+  tab,
+  key,
+  markers,
+  { timeoutMs = Math.min(sheetReadyTimeoutMs, 120_000) } = {}
+) => {
   const started = Date.now();
-  const timeoutMs = Math.min(sheetReadyTimeoutMs, 120_000);
   await sleep(navigationSettleMs);
   let lastState = null;
 
@@ -206,6 +210,38 @@ const waitForPageMarkers = async (tab, key, markers) => {
 
   const missingMarkers = markers.filter((_, index) => !lastState?.markers?.[index]);
   throw new Error(`Resident tab did not become ready: ${key}; missing=${missingMarkers.join(", ")}`);
+};
+
+const waitForSheetPageMarkers = async (tab, sheet) => {
+  const markers = [...sheet.requiredSheets, sheet.menu];
+  try {
+    return await waitForPageMarkers(tab, sheet.key, markers, {
+      timeoutMs: Math.min(sheetReadyTimeoutMs, 60_000)
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.startsWith(`Resident tab did not become ready: ${sheet.key};`)) throw error;
+
+    const expectedUrlPrefix = `https://docs.google.com/spreadsheets/d/${sheet.spreadsheetId}/`;
+    const current = await runtime.pageSummary(tab.windowId);
+    if (!current.url.startsWith(expectedUrlPrefix) || current.auth) {
+      throw new Error(`Sheet preflight reload safety stop: ${sheet.key}`);
+    }
+    await log("resident_sheet_preflight_reload_recovery_started", {
+      sheetKey: sheet.key,
+      windowId: tab.windowId,
+      url: current.url
+    });
+    await runtime.reloadSheetsTabWithVerifiedF5(tab.windowId, { expectedUrlPrefix });
+    const ready = await waitForPageMarkers(tab, sheet.key, markers, {
+      timeoutMs: Math.min(sheetReadyTimeoutMs, 180_000)
+    });
+    await log("resident_sheet_preflight_reload_recovery_completed", {
+      sheetKey: sheet.key,
+      windowId: tab.windowId
+    });
+    return ready;
+  }
 };
 
 const waitForAdminAuthenticated = async (adminTab, timeoutMs) => {
@@ -263,6 +299,23 @@ const downloadReport = async (adminTab, mode, filename) => {
     await runtime.setSelectFollowingLabel(adminTab.windowId, "Day", reportDay);
     await sleep(actionSettleMs);
   }
+  // Re-read the final controls immediately before Download. Mode changes on
+  // 対象管理画面 can reset Month to the current month; a second idempotent pass
+  // prevents a new-month default from producing the wrong monthly CSV.
+  await runtime.setSelectFollowingLabel(adminTab.windowId, "Year", reportYear);
+  await sleep(actionSettleMs);
+  await runtime.setSelectFollowingLabel(adminTab.windowId, "Month", reportMonth);
+  await sleep(actionSettleMs);
+  if (mode === "Daily") {
+    await runtime.setSelectFollowingLabel(adminTab.windowId, "Day", reportDay);
+    await sleep(actionSettleMs);
+  }
+  await log("resident_download_date_controls_reverified", {
+    mode,
+    year: reportYear,
+    month: reportMonth,
+    day: mode === "Daily" ? reportDay : null
+  });
   const before = await captureDownloadSnapshot(downloadDir, filename);
   const startedAtMs = Date.now();
   await runtime.clickExactText(adminTab.windowId, "Download", { delayMs: 750 });
@@ -507,7 +560,7 @@ const runGasAction = async (
   tab,
   sheet,
   action,
-  { waitForStable = false, acceptedWarningLabels = [] } = {}
+  { waitForStable = false, acceptedWarningLabels = [], deferPostDialogNotificationCleanup = false } = {}
 ) => {
   const actionKey = `${sheet.key}:${action}`;
   const successLabels = gasSuccessLabels[actionKey];
@@ -532,10 +585,19 @@ const runGasAction = async (
       text: notification.text,
       count: notification.count
     });
-    await runtime.reloadTab(activeTab.windowId, { expectedUrlPrefix });
+    await runtime.reloadSheetsTabWithVerifiedF5(activeTab.windowId, { expectedUrlPrefix });
     const refreshedTab = await activateSheetTab(activeTab, sheet);
     await ensureConfiguredSheetActive(refreshedTab, sheet, "Post-notification refresh sheet safety check failed");
     await waitForSheetStable(activeTab, sheet.key);
+    const remainingNotification = await runtime.visibleSheetsBlockingNotification(activeTab.windowId);
+    if (remainingNotification.visible) {
+      throw new Error(`${sheet.key} notification remained after verified reload: ${remainingNotification.text}`);
+    }
+    // Apps Script custom menus are injected asynchronously after a Sheets
+    // reload. On the 4 GB VM the sheet can already look stable while the
+    // custom menu is still absent, so wait on the same verified tab instead
+    // of stopping or reloading it again.
+    await runtime.waitForVisibleExactText(activeTab.windowId, sheet.menu);
     await log("resident_sheets_blocking_notification_cleared_by_reload", {
       sheetKey: sheet.key,
       action,
@@ -673,7 +735,11 @@ const runGasAction = async (
   // The final department action has no following GAS action to perform the
   // normal pre-menu notification check. Clear a lingering black Sheets script
   // notification here too so it cannot obstruct the next scheduled run.
-  await refreshBlockingNotification("after-dialog-dismissal");
+  if (deferPostDialogNotificationCleanup) {
+    await log("resident_post_gas_notification_cleanup_deferred", { sheetKey: sheet.key, action });
+  } else {
+    await refreshBlockingNotification("after-dialog-dismissal");
+  }
   if (waitForStable) await waitForSheetStable(activeTab, sheet.key);
   if (dailyRunPath) {
     const current = await readDailyRun(root, reportDate);
@@ -752,13 +818,17 @@ const reconcileImportUiAfterApiVerification = async (tab, importSheet) => {
         text: notification.text,
         count: notification.count
       });
-      await runtime.reloadTab(activeTab.windowId, { expectedUrlPrefix });
+      await runtime.reloadSheetsTabWithVerifiedF5(activeTab.windowId, { expectedUrlPrefix });
       const refreshedTab = await activateSheetTab(activeTab, importSheet);
       await ensureConfiguredSheetActive(
         refreshedTab,
         importSheet,
         "Post-import API cleanup sheet safety check failed"
       );
+      const remainingNotification = await runtime.visibleSheetsBlockingNotification(activeTab.windowId);
+      if (remainingNotification.visible) {
+        throw new Error(`Import notification remained after verified reload: ${remainingNotification.text}`);
+      }
       notificationCleanup = "existing-tab-reloaded";
     }
 
@@ -885,7 +955,7 @@ const verifyResidentTabs = async () => {
   for (const sheet of config.sheets) {
     const tab = await findRequiredTabInWindows(sheet.key, [driveTab.windowId], (url) =>
       url.includes(`/spreadsheets/d/${sheet.spreadsheetId}/`));
-    await waitForPageMarkers(tab, sheet.key, [...sheet.requiredSheets, sheet.menu]);
+    await waitForSheetPageMarkers(tab, sheet);
     sheetTabs.set(sheet.key, tab);
   }
   const workspaceWindows = new Set([driveTab, ...sheetTabs.values()].map(({ windowId }) => windowId));
@@ -1095,14 +1165,20 @@ try {
       previous?.error === "Address-bar typing safety stop: the omnibox did not contain the complete intended text" &&
       previousGasEvidence.importConfirmed &&
       previousGasEvidence.mainImportConfirmed;
-    if (!knownStableCheckFailure &&
+    const knownPreMainChatworkMenuFailure = previous?.status === "failed" &&
+      previous?.stage === "gas_ready:main:②Chatworkに報告" &&
+      previous?.error === "Resident page command failed: expected one visible exact control 集計用, found 0" &&
+      previous?.completedGasActions?.includes("main:①データインポート") &&
+      previous?.mainImportSheetVerification?.verified === true &&
+      previous?.mainImportSheetVerification?.expectedDate === executionDate;
+    if (!knownStableCheckFailure && !knownPreMainChatworkMenuFailure &&
         (previous?.status !== "started" || previous?.stage !== "gas_completed:main:①データインポート")) {
       throw new Error("Post-main-import resume safety stop: main import completion was not explicitly confirmed");
     }
     const sheetVerifiedResume = previous.mainImportSheetVerification?.verified === true &&
       previous.mainImportSheetVerification?.expectedDate === executionDate &&
       Boolean(previous.resumedAfterMainImportSheetVerificationAt);
-    if ((!previous.resumedAfterMainImportDialogAt && !knownStableCheckFailure && !sheetVerifiedResume) ||
+    if ((!previous.resumedAfterMainImportDialogAt && !knownStableCheckFailure && !knownPreMainChatworkMenuFailure && !sheetVerifiedResume) ||
         (!previous.resumedAfterImportDialogAt && !previousGasEvidence.importConfirmed)) {
       throw new Error("Post-main-import resume safety stop: prior dialog confirmation evidence is missing");
     }
@@ -1112,13 +1188,15 @@ try {
     files = expectedFiles.map((name) => path.join(previous.runDir, name));
     for (const file of files) await access(file);
     dailyRunPath = path.join(root, "state", `${reportDate}.json`);
-    if (knownStableCheckFailure) {
+    if (knownStableCheckFailure || knownPreMainChatworkMenuFailure) {
       await updateDailyRun(dailyRunPath, {
         status: "started",
         stage: "gas_completed:main:①データインポート",
-        resumedAfterMainImportDialogAt: new Date().toISOString(),
+        resumedAfterMainImportDialogAt: previous.resumedAfterMainImportDialogAt || new Date().toISOString(),
         resumedAfterImportDialogAt: previous.resumedAfterImportDialogAt || new Date().toISOString(),
-        mainImportDialogConfirmationMethod: "confirmed-before-stability-check",
+        mainImportDialogConfirmationMethod: knownPreMainChatworkMenuFailure
+          ? "a1-verified-before-main-chatwork-menu-failure"
+          : "confirmed-before-stability-check",
         error: undefined,
         failedAt: undefined
       });
@@ -1126,7 +1204,8 @@ try {
     await log("resident_run_resumed_after_main_import_dialog", {
       reportDate,
       sheetVerifiedResume,
-      resumeAfterMainImportBySheet
+      resumeAfterMainImportBySheet,
+      knownPreMainChatworkMenuFailure
     });
   } else if (resumeAfterMainMenuDiagnosticStop) {
     const previous = await readDailyRun(root, reportDate);
@@ -1380,7 +1459,9 @@ try {
     await log("resident_import_gas_not_repeated", { reportDate });
   } else {
     try {
-      await runGasAction(sheetTabs.get("import"), importSheet, "データインポート");
+      await runGasAction(sheetTabs.get("import"), importSheet, "データインポート", {
+        deferPostDialogNotificationCleanup: true
+      });
       const verification = await verifyImportOutput(sheetTabs.get("import"), importSheet, "after-confirmed-dialog");
       await updateDailyRun(dailyRunPath, {
         importSheetVerifiedAt: new Date().toISOString(),
@@ -1390,9 +1471,22 @@ try {
         failedAt: undefined
       });
       trustedImportVerification = true;
+      const importUiCleanup = await reconcileImportUiAfterApiVerification(
+        sheetTabs.get("import"),
+        importSheet
+      );
+      await updateDailyRun(dailyRunPath, { importUiCleanup });
     } catch (error) {
-      if (String(error?.message || error) !== "Timed out waiting for the GAS result dialog") throw error;
-      const verification = await verifyImportOutput(sheetTabs.get("import"), importSheet, "after-dialog-timeout");
+      const message = String(error?.message || error);
+      const apiVerifiableUiFailures = new Set([
+        "Timed out waiting for the GAS result dialog",
+        "GAS dialog did not disappear after clicking OK"
+      ]);
+      if (!apiVerifiableUiFailures.has(message)) throw error;
+      const verificationMethod = message === "Timed out waiting for the GAS result dialog"
+        ? "after-dialog-timeout"
+        : "after-dialog-dismissal-failure";
+      const verification = await verifyImportOutput(sheetTabs.get("import"), importSheet, verificationMethod);
       const current = await readDailyRun(root, reportDate);
       const actionKey = "import:データインポート";
       const confirmedGasActions = [...new Set([...(current?.confirmedGasActions || []), actionKey])];
@@ -1405,12 +1499,17 @@ try {
         gasCompletedAt: new Date().toISOString(),
         importSheetVerifiedAt: new Date().toISOString(),
         importSheetVerification: verification,
-        importDialogConfirmationMethod: "sheet-date-verified-after-dialog-timeout",
+        importDialogConfirmationMethod: `sheet-date-verified-${verificationMethod}`,
         error: undefined,
         failedAt: undefined
       });
       trustedImportVerification = true;
-      await log("resident_import_dialog_timeout_accepted_by_sheet_verification", { reportDate, verification });
+      await log("resident_import_ui_failure_accepted_by_sheet_verification", {
+        reportDate,
+        message,
+        verificationMethod,
+        verification
+      });
       const importUiCleanup = await reconcileImportUiAfterApiVerification(
         sheetTabs.get("import"),
         importSheet

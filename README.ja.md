@@ -38,6 +38,21 @@ Linux VM 上で、**人間が開いたままにしている既存の Chrome セ�
 
 **多段の安全ロック。** 実処理は `--live` と全安全フラグの明示的な有効化がそろわなければ開始しません。既定の `config/automation.json` は全フラグが `false` です。
 
+**電源を落とすのは、落としてよいと確認できたときだけ。** 日次の処理が終われば VM は用済みですが、**動いている最中に落とすと、途中で止まったことすら記録に残りません。** そのため停止は6つの条件がすべて揃ったときに限っています。
+
+| 条件 | 落とさない理由 |
+|---|---|
+| `REPORT_AUTOMATION_ALLOW_POWEROFF=1` | 明示的に有効にしていない環境で誤って落とさない |
+| 毎月2日ではない | 月またぎの処理があり、通常と手順が違う |
+| JST 06:30〜10:30 の間 | 想定外の時刻に動いているなら、状況が把握できていない |
+| 状態ファイルが `completed` | 対象日の処理が最後まで終わっている |
+| 実行ロックが空いている | 別の実行が走っていない |
+| Chrome が正常終了した | セッションを壊さずに閉じられた |
+
+**1つでも欠ければ起動したままにします。** 判断できないときは止まる、という他の箇所と同じ扱いです。ロックは root で作らず、既にある場合のみ確認します。**検査のつもりで本番のロックを作ってしまう**のを避けるためです。
+
+起動側は GCE の instance schedule に任せています（`scripts/configure-instance-start-schedule.sh`）。**停止の判断だけが難しく、起動は時刻で決め打ちできる**という非対称があります。
+
 ## 構成
 
 ```
@@ -55,7 +70,12 @@ config/
   automation.json               既定（全安全フラグ off）
   automation.live.json          本番用
   automation.once.example.json  単発実行の例
-systemd/    タイマー起動ユニット
+scripts/    運用スクリプト
+  shutdown-if-success.sh              6条件そろったときだけ VM を落とす
+  configure-instance-start-schedule.sh  GCE 側の起動スケジュール
+  install-power-cycle.sh              上記の systemd への組み込み
+  check-syntax.mjs                    JS とシェルの構文チェック
+systemd/    タイマー起動ユニット・停止判定ユニット
 test/       node:test による単体テスト
 ```
 
