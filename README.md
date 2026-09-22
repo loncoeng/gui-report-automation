@@ -1,6 +1,6 @@
 # gui-report-automation
 
-[![test](https://github.com/lon-coeng/gui-report-automation/actions/workflows/test.yml/badge.svg)](https://github.com/lon-coeng/gui-report-automation/actions/workflows/test.yml)
+[![test](https://github.com/loncoeng/gui-report-automation/actions/workflows/test.yml/badge.svg)](https://github.com/loncoeng/gui-report-automation/actions/workflows/test.yml)
 
 *[日本語版 / Japanese version](README.ja.md)*
 
