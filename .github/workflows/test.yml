@@ -15,6 +15,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # publish-guard reads the whole history; a shallow clone
+          # would make the check meaningless.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -36,3 +40,37 @@ jobs:
             echo "checking $f"
             bash -n "$f"
           done
+
+      # The shop this was rebuilt from must not be identifiable from what is
+      # published here — including from the history, which a force-push does
+      # not clean. publish-guard reads every blob on every ref.
+      #
+      # The terms arrive from a secret rather than a committed file: writing
+      # them down in order to forbid them would publish them.
+      #
+      # An unset secret warns and passes. Failing on a missing secret trains
+      # people to ignore the check; passing in silence is worse than having none.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Nothing identifying in the history
+        env:
+          FORBIDDEN_TERMS: ${{ secrets.FORBIDDEN_TERMS }}
+        run: |
+          if [ -z "${FORBIDDEN_TERMS}" ]; then
+            echo "::warning::FORBIDDEN_TERMS is not set — the history was not checked."
+            exit 0
+          fi
+          python -m pip install --quiet publish-guard
+          python - <<'PY' > publish-guard.generated.toml
+          import os
+          terms = [t.strip() for t in os.environ["FORBIDDEN_TERMS"].splitlines() if t.strip()]
+          print("[forbidden]")
+          print("terms = [")
+          for t in terms:
+              print(f"  {t!r},".replace("'", '"'))
+          print("]")
+          PY
+          publish-guard verify . --config publish-guard.generated.toml
+          rm -f publish-guard.generated.toml

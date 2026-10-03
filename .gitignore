@@ -43,3 +43,8 @@ credentials/
 *.zip
 *.bak
 *.tmp
+
+# Built from the FORBIDDEN_TERMS secret during the leak check, and holding the
+# very values that must not be committed.
+publish-guard.generated.toml
+publish-guard.local.toml
