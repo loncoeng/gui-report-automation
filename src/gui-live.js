@@ -6,7 +6,12 @@ import { createLogger } from "./logger.js";
 import { beginDailyRun, completeDailyRun, failDailyRun, readDailyRun, updateDailyRun } from "./run-state.js";
 import { readSheetDateRange, verifyImportSheetReportDate } from "./import-sheet-verification.js";
 import { readDriveExactFileCounts } from "./drive-verification.js";
-import { ExistingChromeRuntime, sleep } from "./gui-runtime.js";
+import { decideDriveUploadRecovery } from "./drive-upload-recovery.js";
+import {
+  ExistingChromeRuntime,
+  FILE_CHOOSER_PORTAL_RECOVERED,
+  sleep
+} from "./gui-runtime.js";
 import {
   captureDownloadSnapshot,
   moveDownloadIntoRun,
@@ -40,6 +45,8 @@ const sheetReadyTimeoutMs = config.waits?.sheetReadyTimeoutMs ?? 600_000;
 const sheetStableWindowMs = config.waits?.sheetStableWindowMs ?? 30_000;
 const postGasOkSettleMs = config.waits?.postGasOkSettleMs ?? 20_000;
 const dateAvailabilityRetryDelayMs = config.waits?.dateAvailabilityRetryDelayMs ?? 180_000;
+const googleAccountChooserTimeoutMs = config.waits?.googleAccountChooserTimeoutMs ?? 15_000;
+const googleAccountSelectionSettleMs = config.waits?.googleAccountSelectionSettleMs ?? 3_000;
 
 const today = tokyoDateParts();
 const dayOfMonth = Number(today.day);
@@ -272,20 +279,32 @@ const recoverAdminLogin = async (adminTab) => {
     }
   }
   if (!clicked) throw new Error("Manual authentication required: Sign in with Google control was not uniquely available");
-  await sleep(navigationSettleMs);
-
-  if (await waitForAdminAuthenticated(adminTab, 10_000)) {
-    await log("resident_google_signin_ok", { accountSelectionRequired: false });
-    return;
+  // The Google account chooser is browser UI. While it is open, probing the
+  // address bar to inspect the page is unsafe and cannot prove authentication.
+  // Look only for the configured account first, click it exactly once, then
+  // return to the normal page-level verification after the chooser closes.
+  await sleep(googleAccountSelectionSettleMs);
+  const coordinates = await runtime.waitForExactEmailCoordinates(
+    adminTab.windowId,
+    config.admin.googleAccountEmail,
+    { timeoutMs: googleAccountChooserTimeoutMs, intervalMs: 1_000 }
+  );
+  if (coordinates) {
+    await runtime.clickWindowCoordinates(adminTab.windowId, coordinates);
+    await log("resident_google_account_selected", {
+      accountEmail: config.admin.googleAccountEmail,
+      windowId: adminTab.windowId
+    });
+    await sleep(googleAccountSelectionSettleMs);
   }
-
-  const coordinates = await runtime.exactEmailCoordinates(adminTab.windowId, config.admin.googleAccountEmail);
-  await runtime.clickWindowCoordinates(adminTab.windowId, coordinates);
-  await sleep(navigationSettleMs);
   if (!(await waitForAdminAuthenticated(adminTab, config.admin.googleSignInTimeoutMs ?? 90_000))) {
-    throw new Error("Manual authentication required: approved Google account was selected but 対象管理画面 did not authenticate");
+    throw new Error(
+      coordinates
+        ? "Manual authentication required: approved Google account was selected but 対象管理画面 did not authenticate"
+        : "Manual authentication required: Google sign-in neither authenticated nor showed the approved account"
+    );
   }
-  await log("resident_google_signin_ok", { accountSelectionRequired: true });
+  await log("resident_google_signin_ok", { accountSelectionRequired: Boolean(coordinates) });
 };
 
 const downloadReport = async (adminTab, mode, filename) => {
@@ -428,14 +447,7 @@ const waitForDriveFilename = async (driveTab, filename) => {
   throw new Error(`Drive upload could not be verified: ${filename}`);
 };
 
-const uploadFileToDrive = async (driveTab, filePath) => {
-  const filename = path.basename(filePath);
-  // Do not use body text here: a stale completed-upload toast can contain an
-  // old filename even when the actual folder has no such file.
-  const existingRowCount = await runtime.driveVisibleRowExactNameCount(driveTab.windowId, filename);
-  if (existingRowCount > 0) {
-    throw new Error(`Drive safety stop: a file already exists in レポート保存 (${filename})`);
-  }
+const openDriveFileUploadChooser = async (driveTab) => {
   const retryReadOnly = async (operation, attempts = 3) => {
     let lastError;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -465,22 +477,70 @@ const uploadFileToDrive = async (driveTab, filePath) => {
   await log("resident_drive_file_upload_selected_by_menu_order", {
     selection: "second_item_after_home"
   });
-  try {
-    await runtime.chooseFile(filePath);
-  } catch (error) {
-    if (String(error instanceof Error ? error.message : error) !==
-        "File chooser did not close after selecting the approved file") {
-      throw error;
+};
+
+const readDriveUploadExactCountByApi = async (filename, attempts = 3) => {
+  let verification;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    verification = await readDriveExactFileCounts({
+      folderId: config.drive.folderId,
+      filenames: [filename],
+      auth: config.driveReadVerification
+    });
+    const count = verification.counts?.[filename];
+    if (!Number.isInteger(count) || count < 0) {
+      throw new Error(`Drive upload recovery safety stop: invalid API count (${filename})`);
     }
-    // A low-spec desktop can keep the portal chooser mapped after Drive has
-    // already accepted the file. Reconcile only from the exact visible Drive
-    // row; never click Upload a second time merely because the chooser lingered.
-    await waitForDriveFilename(driveTab, filename);
-    await log("resident_file_chooser_linger_reconciled_by_drive_row", { filename });
+    await log("resident_drive_upload_recovery_api_checked", { filename, attempt, count });
+    if (count > 0 || attempt === attempts) return count;
+    await sleep(5_000);
   }
-  await waitForDriveFilename(driveTab, filename);
-  await sleep(actionSettleMs);
-  await log("resident_drive_upload_ok", { filename });
+  return verification?.counts?.[filename] ?? 0;
+};
+
+const uploadFileToDrive = async (driveTab, filePath) => {
+  const filename = path.basename(filePath);
+  // Do not use body text here: a stale completed-upload toast can contain an
+  // old filename even when the actual folder has no such file.
+  const existingRowCount = await runtime.driveVisibleRowExactNameCount(driveTab.windowId, filename);
+  if (existingRowCount > 0) {
+    throw new Error(`Drive safety stop: a file already exists in レポート保存 (${filename})`);
+  }
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    await openDriveFileUploadChooser(driveTab);
+    try {
+      await runtime.chooseFile(filePath);
+      await waitForDriveFilename(driveTab, filename);
+      await sleep(actionSettleMs);
+      await log("resident_drive_upload_ok", { filename, attempt });
+      return;
+    } catch (error) {
+      const message = String(error instanceof Error ? error.message : error);
+      if (message !== FILE_CHOOSER_PORTAL_RECOVERED) throw error;
+
+      // The GTK backend has been restarted. Before opening another chooser,
+      // use the existing read-only keyless API to prove whether Drive already
+      // accepted the exact file. An unavailable API is a safety stop: never
+      // risk creating a duplicate merely to recover automatically.
+      const apiCount = await readDriveUploadExactCountByApi(filename);
+      let recoveryDecision;
+      try {
+        recoveryDecision = decideDriveUploadRecovery({ count: apiCount, attempt, maxAttempts: 2 });
+      } catch (error) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)} (${filename})`);
+      }
+      if (recoveryDecision === "already-uploaded") {
+        await log("resident_file_chooser_recovered_upload_verified_by_api", { filename, attempt });
+        await sleep(actionSettleMs);
+        return;
+      }
+      if (recoveryDecision === "stop") {
+        throw new Error(`Drive upload could not be verified after one GTK recovery retry: ${filename}`);
+      }
+      await log("resident_file_chooser_recovered_upload_retrying_once", { filename, attempt });
+    }
+  }
 };
 
 const archiveExistingMonthlyDriveFile = async (driveTab) => {

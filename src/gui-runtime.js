@@ -7,6 +7,13 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+export const FILE_CHOOSER_PORTAL_RECOVERED =
+  "File chooser portal recovered after the approved file could not be selected";
+
+export const isExpectedPortalFileChooser = ({ className = "", title = "" } = {}) =>
+  /xdg-desktop-portal-gtk/i.test(className) &&
+  /^(?:Open Files?|Choose Files?|ファイルを開く)$/i.test(title.trim());
+
 const normalizeWindowId = (value) => `0x${Number(value).toString(16).padStart(8, "0")}`;
 const isBrowserAddress = (value) => {
   try {
@@ -146,6 +153,29 @@ export class ExistingChromeRuntime {
       .filter((line) => /\sgoogle-chrome\.Google-chrome\s/i.test(line))
       .map((line) => line.trim().split(/\s+/)[0])
       .filter(Boolean);
+  }
+
+  async windowClassWithFallback(windowId, { xdotoolWindowId = windowId } = {}) {
+    const xdotoolClass = (await this.run("xdotool", ["getwindowclassname", xdotoolWindowId])
+      .catch(() => ({ stdout: "" }))).stdout;
+    if (xdotoolClass) return { className: xdotoolClass, source: "xdotool" };
+
+    // xdotool can transiently return an empty WM_CLASS for a real GTK portal
+    // window on the low-spec VM. wmctrl reads the same X11 property through a
+    // separate path. Accept its value only for the exact active window id;
+    // the caller must still verify the exact chooser title and GTK class.
+    const wmctrl = await this.run("wmctrl", ["-lx"]).catch(() => ({ stdout: "" }));
+    const targetId = Number.parseInt(String(windowId), 16);
+    const matchingLine = wmctrl.stdout.split("\n").find((line) => {
+      const candidateId = line.trim().split(/\s+/)[0];
+      return Number.isInteger(targetId) && Number.parseInt(candidateId, 16) === targetId;
+    });
+    const wmctrlClass = matchingLine?.trim().split(/\s+/)[2] || "";
+    if (wmctrlClass) {
+      await this.log("resident_window_class_resolved_by_wmctrl", { windowId, className: wmctrlClass });
+      return { className: wmctrlClass, source: "wmctrl" };
+    }
+    return { className: "", source: "unavailable" };
   }
 
   async activateWindow(windowId) {
@@ -1109,17 +1139,31 @@ export class ExistingChromeRuntime {
     await access(filePath);
     const started = Date.now();
     let chooserId = null;
+    let chooserDetails = null;
+    const rejectedCandidates = new Set();
     while (Date.now() - started < timeoutMs) {
       await delay(300);
       const active = (await this.run("xdotool", ["getactivewindow"])).stdout;
       const windowId = normalizeWindowId(active);
-      const className = (await this.run("xdotool", ["getwindowclassname", active]).catch(() => ({ stdout: "" }))).stdout;
-      if (!/chrome/i.test(className)) {
+      const { className, source: classSource } = await this.windowClassWithFallback(windowId, {
+        xdotoolWindowId: active
+      });
+      const title = (await this.run("xdotool", ["getwindowname", active]).catch(() => ({ stdout: "" }))).stdout;
+      if (isExpectedPortalFileChooser({ className, title })) {
         chooserId = windowId;
+        chooserDetails = { className, title, classSource };
         break;
+      }
+      if (!/chrome/i.test(className)) {
+        const candidate = `${windowId}:${className}:${title}`;
+        if (!rejectedCandidates.has(candidate)) {
+          rejectedCandidates.add(candidate);
+          await this.log("resident_file_chooser_candidate_rejected", { windowId, className, title });
+        }
       }
     }
     if (!chooserId) throw new Error("File chooser did not open");
+    await this.log("resident_file_chooser_verified", { windowId: chooserId, ...chooserDetails });
     await this.run("xdotool", ["windowactivate", "--sync", chooserId]);
     await this.run("xdotool", ["key", "--clearmodifiers", "ctrl+l"]);
     await delay(1_000);
@@ -1141,7 +1185,48 @@ export class ExistingChromeRuntime {
       await this.run("xdotool", ["key", "--clearmodifiers", "Return"]);
       await this.log("resident_file_chooser_confirm_retried", { attempt });
     }
-    throw new Error("File chooser did not close after selecting the approved file");
+    await this.recoverStuckFileChooser(chooserId);
+    throw new Error(FILE_CHOOSER_PORTAL_RECOVERED);
+  }
+
+  async recoverStuckFileChooser(windowId, { settleMs = 2_000 } = {}) {
+    const { className, source: classSource } = await this.windowClassWithFallback(windowId);
+    const title = (await this.run("xdotool", ["getwindowname", windowId])
+      .catch(() => ({ stdout: "" }))).stdout;
+    if (!isExpectedPortalFileChooser({ className, title })) {
+      throw new Error(
+        `File chooser recovery safety stop: unexpected window (${className || "unknown"}; ${title || "untitled"})`
+      );
+    }
+
+    await this.log("resident_file_chooser_recovery_started", {
+      windowId,
+      className,
+      title,
+      classSource
+    });
+    await this.run("wmctrl", ["-ic", windowId]);
+    await delay(settleMs);
+    const chooserInfo = await this.run("xwininfo", ["-id", windowId]).catch(() => null);
+    if (chooserInfo && /Map State:\s+IsViewable/i.test(chooserInfo.stdout)) {
+      throw new Error("File chooser recovery safety stop: verified chooser did not close");
+    }
+
+    await this.run("systemctl", ["--user", "restart", "xdg-desktop-portal-gtk.service"], {
+      timeout: 30_000
+    });
+    await delay(settleMs);
+    const serviceState = await this.run(
+      "systemctl",
+      ["--user", "is-active", "xdg-desktop-portal-gtk.service"]
+    );
+    if (serviceState.stdout !== "active") {
+      throw new Error(`File chooser recovery failed: portal state=${serviceState.stdout || "unknown"}`);
+    }
+    await this.log("resident_file_chooser_portal_restarted", {
+      windowId,
+      service: "xdg-desktop-portal-gtk.service"
+    });
   }
 
   async closeOpenFileChoosers() {
@@ -1388,6 +1473,47 @@ export class ExistingChromeRuntime {
       await rm(xwdPath, { force: true });
       await rm(pngPath, { force: true });
     }
+  }
+
+  async waitForExactEmailCoordinates(
+    windowId,
+    email,
+    { timeoutMs = 15_000, intervalMs = 1_000 } = {}
+  ) {
+    const started = Date.now();
+    let attempt = 0;
+    while (Date.now() - started < timeoutMs) {
+      attempt += 1;
+      try {
+        const coordinates = await this.exactEmailCoordinates(windowId, email);
+        await this.log("resident_google_account_chooser_detected", {
+          windowId,
+          accountEmail: email,
+          attempt
+        });
+        return coordinates;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // A zero-match OCR result means the approved chooser row has not
+        // appeared yet (or Google completed sign-in without a chooser). Any
+        // ambiguous result must remain a safety stop rather than guessing.
+        if (!/approved account OCR matches=0$/.test(message)) throw error;
+        await this.log("resident_google_account_chooser_waiting", {
+          windowId,
+          accountEmail: email,
+          attempt
+        });
+      }
+
+      const remainingMs = timeoutMs - (Date.now() - started);
+      if (remainingMs > 0) await delay(Math.min(intervalMs, remainingMs));
+    }
+    await this.log("resident_google_account_chooser_not_found", {
+      windowId,
+      accountEmail: email,
+      attempts: attempt
+    });
+    return null;
   }
 
   async clickWindowCoordinates(windowId, { x, y }) {

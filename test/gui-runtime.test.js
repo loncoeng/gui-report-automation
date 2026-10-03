@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { ExistingChromeRuntime } from "../src/gui-runtime.js";
+import {
+  ExistingChromeRuntime,
+  FILE_CHOOSER_PORTAL_RECOVERED,
+  isExpectedPortalFileChooser
+} from "../src/gui-runtime.js";
 
 test("resident page commands do not use eval, which Google Sheets blocks", async () => {
   const source = await readFile(new URL("../src/gui-runtime.js", import.meta.url), "utf8");
@@ -71,6 +75,64 @@ test("address-bar focus retries a transient non-URL selection before stopping", 
   assert.equal(events.some(({ event }) => event === "resident_address_bar_focus_retry"), true);
   assert.equal(events.at(-1).event, "resident_address_bar_focus_verified");
   assert.equal(events.at(-1).details.attempt, 2);
+});
+
+test("Google account chooser waits for the exact approved email without probing the page", async () => {
+  const events = [];
+  const runtime = new ExistingChromeRuntime({
+    root: "/tmp",
+    log: async (event, details) => events.push({ event, details })
+  });
+  let attempts = 0;
+  runtime.exactEmailCoordinates = async () => {
+    attempts += 1;
+    if (attempts < 3) {
+      throw new Error("Manual authentication required: approved account OCR matches=0");
+    }
+    return { x: 640, y: 420 };
+  };
+
+  const coordinates = await runtime.waitForExactEmailCoordinates(
+    "admin-window",
+    "source-account@example.com",
+    { timeoutMs: 100, intervalMs: 1 }
+  );
+
+  assert.deepEqual(coordinates, { x: 640, y: 420 });
+  assert.equal(attempts, 3);
+  assert.equal(events.filter(({ event }) => event === "resident_google_account_chooser_waiting").length, 2);
+  assert.equal(events.at(-1).event, "resident_google_account_chooser_detected");
+});
+
+test("Google account chooser stops on an ambiguous approved-email OCR result", async () => {
+  const runtime = new ExistingChromeRuntime({ root: "/tmp", log: async () => {} });
+  runtime.exactEmailCoordinates = async () => {
+    throw new Error("Manual authentication required: approved account OCR matches=2");
+  };
+
+  await assert.rejects(
+    runtime.waitForExactEmailCoordinates(
+      "admin-window",
+      "source-account@example.com",
+      { timeoutMs: 100, intervalMs: 1 }
+    ),
+    /approved account OCR matches=2/
+  );
+});
+
+test("resident Google sign-in selects the approved chooser row before page authentication probes", async () => {
+  const source = await readFile(new URL("../src/gui-live.js", import.meta.url), "utf8");
+  const start = source.indexOf("const recoverAdminLogin = async");
+  const end = source.indexOf("\nconst downloadReport = async", start);
+  const recovery = source.slice(start, end);
+
+  const chooserIndex = recovery.indexOf("runtime.waitForExactEmailCoordinates");
+  const pageProbeIndex = recovery.indexOf("waitForAdminAuthenticated");
+  assert.notEqual(chooserIndex, -1);
+  assert.notEqual(pageProbeIndex, -1);
+  assert.ok(chooserIndex < pageProbeIndex);
+  assert.match(recovery, /googleAccountSelectionSettleMs/);
+  assert.match(recovery, /resident_google_account_selected/);
 });
 
 test("address-bar submission verifies the pasted text before Return", async () => {
@@ -593,7 +655,124 @@ test("file chooser selection waits for the chooser window to close on a low-spec
   assert.match(source, /Map State:\\s\+IsViewable/);
   assert.match(source, /resident_file_chooser_confirm_retried/);
   assert.match(source, /resident_file_chooser_closed_after_selection/);
-  assert.match(source, /File chooser did not close after selecting the approved file/);
+  assert.match(source, /recoverStuckFileChooser/);
+  assert.match(source, /FILE_CHOOSER_PORTAL_RECOVERED/);
+});
+
+test("GTK recovery accepts only the verified portal file chooser", () => {
+  assert.equal(isExpectedPortalFileChooser({
+    className: "xdg-desktop-portal-gtk.Xdg-desktop-portal-gtk",
+    title: "Open Files"
+  }), true);
+  assert.equal(isExpectedPortalFileChooser({
+    className: "xdg-desktop-portal-gtk.Xdg-desktop-portal-gtk",
+    title: "Authentication Required"
+  }), false);
+  assert.equal(isExpectedPortalFileChooser({
+    className: "google-chrome.Google-chrome",
+    title: "Open Files"
+  }), false);
+});
+
+test("file chooser class falls back to the exact wmctrl window when xdotool is blank", async () => {
+  const events = [];
+  const runtime = new ExistingChromeRuntime({
+    root: "/tmp",
+    log: async (event, details) => events.push({ event, details })
+  });
+  runtime.run = async (command, args) => {
+    if (command === "xdotool" && args[0] === "getwindowclassname") {
+      return { stdout: "", stderr: "" };
+    }
+    if (command === "wmctrl" && args.join(" ") === "-lx") {
+      return {
+        stdout: [
+          "0x03400010 0 google-chrome.Google-chrome host レポート保存 - Google Drive - Google Chrome",
+          "0x03e00003 0 xdg-desktop-portal-gtk.Xdg-desktop-portal-gtk host Open Files"
+        ].join("\n"),
+        stderr: ""
+      };
+    }
+    throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+  };
+
+  const identity = await runtime.windowClassWithFallback("0x03e00003");
+
+  assert.deepEqual(identity, {
+    className: "xdg-desktop-portal-gtk.Xdg-desktop-portal-gtk",
+    source: "wmctrl"
+  });
+  assert.equal(isExpectedPortalFileChooser({
+    className: identity.className,
+    title: "Open Files"
+  }), true);
+  assert.equal(events.at(-1).event, "resident_window_class_resolved_by_wmctrl");
+});
+
+test("file chooser class fallback never borrows a different window's GTK class", async () => {
+  const runtime = new ExistingChromeRuntime({ root: "/tmp", log: async () => {} });
+  runtime.run = async (command) => {
+    if (command === "xdotool") return { stdout: "", stderr: "" };
+    if (command === "wmctrl") {
+      return {
+        stdout: "0x03e00003 0 xdg-desktop-portal-gtk.Xdg-desktop-portal-gtk host Open Files",
+        stderr: ""
+      };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  const identity = await runtime.windowClassWithFallback("0x03400010");
+
+  assert.deepEqual(identity, { className: "", source: "unavailable" });
+  assert.equal(isExpectedPortalFileChooser({
+    className: identity.className,
+    title: "Open Files"
+  }), false);
+});
+
+test("GTK recovery closes only the verified chooser and restarts only its user service", async () => {
+  const events = [];
+  const commands = [];
+  const runtime = new ExistingChromeRuntime({
+    root: "/tmp",
+    log: async (event, details) => events.push({ event, details })
+  });
+  runtime.run = async (command, args) => {
+    commands.push([command, args]);
+    if (command === "xdotool" && args[0] === "getwindowclassname") {
+      return { stdout: "xdg-desktop-portal-gtk.Xdg-desktop-portal-gtk", stderr: "" };
+    }
+    if (command === "xdotool" && args[0] === "getwindowname") {
+      return { stdout: "Open Files", stderr: "" };
+    }
+    if (command === "systemctl" && args.includes("is-active")) {
+      return { stdout: "active", stderr: "" };
+    }
+    return { stdout: "", stderr: "" };
+  };
+
+  await runtime.recoverStuckFileChooser("0x01234567", { settleMs: 0 });
+
+  assert.equal(commands.some(([command, args]) =>
+    command === "wmctrl" && args.join(" ") === "-ic 0x01234567"), true);
+  assert.equal(commands.some(([command, args]) =>
+    command === "systemctl" &&
+    args.join(" ") === "--user restart xdg-desktop-portal-gtk.service"), true);
+  assert.equal(commands.some(([command]) => command === "pkill" || command === "kill"), false);
+  assert.equal(events.at(-1).event, "resident_file_chooser_portal_restarted");
+});
+
+test("Drive retries a recovered GTK chooser only after exact read-only API reconciliation", async () => {
+  const source = await readFile(new URL("../src/gui-live.js", import.meta.url), "utf8");
+  assert.match(source, /FILE_CHOOSER_PORTAL_RECOVERED/);
+  assert.match(source, /readDriveUploadExactCountByApi/);
+  assert.match(source, /resident_drive_upload_recovery_api_checked/);
+  assert.match(source, /resident_file_chooser_recovered_upload_verified_by_api/);
+  assert.match(source, /resident_file_chooser_recovered_upload_retrying_once/);
+  assert.match(source, /attempt <= 2/);
+  assert.match(source, /Drive upload could not be verified after one GTK recovery retry/);
+  assert.equal(FILE_CHOOSER_PORTAL_RECOVERED.includes("recovered"), true);
 });
 
 test("an exact chooser failure resumes by reconciling each visible Drive row", async () => {
@@ -1221,7 +1400,7 @@ test("known GAS warnings and observable Drive cleanup continue without blind ret
   assert.match(liveSource, /gasAcceptedWarningLabels/);
   assert.match(liveSource, /最大値を超えました/);
   assert.match(liveSource, /resident_gas_warning_notification_requires_reload/);
-  assert.match(liveSource, /resident_file_chooser_linger_reconciled_by_drive_row/);
+  assert.match(liveSource, /resident_file_chooser_recovered_upload_verified_by_api/);
   assert.match(liveSource, /readDriveExactFileCounts/);
   assert.match(liveSource, /resident_drive_cleanup_verified_by_api/);
   assert.match(liveSource, /drive-cleanup-audit-unavailable/);

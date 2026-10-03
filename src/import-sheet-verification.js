@@ -10,6 +10,7 @@ const metadataTokenUrl =
 const iamCredentialsBaseUrl = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts";
 const sheetsApiBaseUrl = "https://sheets.googleapis.com/v4/spreadsheets";
 const sheetsReadonlyScope = "https://www.googleapis.com/auth/spreadsheets.readonly";
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 const normalizeDate = (value) => {
   const match = String(value ?? "").normalize("NFKC").match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
@@ -39,6 +40,38 @@ const requestJson = async ({ fetchImpl, url, options, timeoutMs, label }) => {
   } catch {
     throw new Error(`Import sheet verification safety stop: ${label} returned invalid JSON`);
   }
+};
+
+const isRetryableSheetsReadError = (error) => {
+  const message = String(error?.message || error);
+  return /Sheets API read (?:timed out|request failed|returned HTTP (?:429|5\d\d))$/.test(message);
+};
+
+const requestSheetsJson = async ({ fetchImpl, url, options, auth }) => {
+  const attempts = Number.isInteger(auth?.sheetsReadAttempts) && auth.sheetsReadAttempts > 0
+    ? auth.sheetsReadAttempts
+    : 3;
+  const retryDelayMs = Number.isInteger(auth?.sheetsReadRetryDelayMs) && auth.sheetsReadRetryDelayMs >= 0
+    ? auth.sheetsReadRetryDelayMs
+    : 10_000;
+
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await requestJson({
+        fetchImpl,
+        url,
+        options,
+        timeoutMs: auth.requestTimeoutMs ?? 20_000,
+        label: "Sheets API read"
+      });
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableSheetsReadError(error) || attempt === attempts) throw error;
+      await delay(retryDelayMs);
+    }
+  }
+  throw lastError;
 };
 
 const obtainImpersonatedToken = async ({ fetchImpl, auth }) => {
@@ -109,18 +142,16 @@ export const readSheetDateRange = async ({
   const range = `${verification.sheetName}!${verification.column}${verification.startRow}:${verification.column}${verification.endRow}`;
   const expectedCellCount = verification.endRow - verification.startRow + 1;
   const token = await obtainImpersonatedToken({ fetchImpl, auth });
-  const timeoutMs = auth.requestTimeoutMs ?? 20_000;
   const query = new URLSearchParams({
     majorDimension: "ROWS",
     valueRenderOption: "FORMATTED_VALUE",
     dateTimeRenderOption: "FORMATTED_STRING"
   });
-  const result = await requestJson({
+  const result = await requestSheetsJson({
     fetchImpl,
     url: `${sheetsApiBaseUrl}/${encodeURIComponent(sheet.spreadsheetId)}/values/${encodeURIComponent(range)}?${query}`,
     options: { headers: { Authorization: `Bearer ${token}` } },
-    timeoutMs,
-    label: "Sheets API read"
+    auth
   });
 
   const rows = Array.isArray(result?.values) ? result.values : [];

@@ -144,6 +144,58 @@ test("verification fails closed when metadata, impersonation, or Sheets API fail
   }
 });
 
+test("Sheets API read retries transient failures up to three attempts", async () => {
+  let sheetsAttempts = 0;
+  const fetchImpl = async (url) => {
+    const value = String(url);
+    if (value.includes("metadata.google.internal")) return jsonResponse({ access_token: "metadata-token" });
+    if (value.includes("iamcredentials.googleapis.com")) return jsonResponse({ accessToken: "impersonated-token" });
+    sheetsAttempts += 1;
+    if (sheetsAttempts < 3) {
+      const error = new Error("temporary timeout");
+      error.name = "AbortError";
+      throw error;
+    }
+    return jsonResponse({
+      values: [["2026/08/19"], ["2026/08/19"], ["2026/08/19"], ["2026/08/19"]]
+    });
+  };
+
+  const result = await verifyImportSheetReportDate({
+    sheet,
+    reportDate: "2026-08-19",
+    auth: { ...auth, sheetsReadAttempts: 3, sheetsReadRetryDelayMs: 0 },
+    fetchImpl
+  });
+
+  assert.equal(result.verified, true);
+  assert.equal(sheetsAttempts, 3);
+});
+
+test("Sheets API read stops after the configured transient retry limit", async () => {
+  let sheetsAttempts = 0;
+  const fetchImpl = async (url) => {
+    const value = String(url);
+    if (value.includes("metadata.google.internal")) return jsonResponse({ access_token: "metadata-token" });
+    if (value.includes("iamcredentials.googleapis.com")) return jsonResponse({ accessToken: "impersonated-token" });
+    sheetsAttempts += 1;
+    const error = new Error("temporary network failure");
+    error.name = "TypeError";
+    throw error;
+  };
+
+  await assert.rejects(
+    verifyImportSheetReportDate({
+      sheet,
+      reportDate: "2026-08-19",
+      auth: { ...auth, sheetsReadAttempts: 3, sheetsReadRetryDelayMs: 0 },
+      fetchImpl
+    }),
+    /Sheets API read request failed/
+  );
+  assert.equal(sheetsAttempts, 3);
+});
+
 test("verification rejects missing or non-keyless auth configuration", async () => {
   await assert.rejects(
     verifyImportSheetReportDate({

@@ -58,7 +58,9 @@
     "mode": "gce-service-account-impersonation",
     "targetServiceAccount": "sheets-reader@example-project.iam.gserviceaccount.com",
     "tokenLifetimeSeconds": 600,
-    "requestTimeoutMs": 20000
+    "requestTimeoutMs": 20000,
+    "sheetsReadAttempts": 3,
+    "sheetsReadRetryDelayMs": 10000
   },
   "sheets": [
     {
