@@ -64,12 +64,15 @@ jobs:
           fi
           python -m pip install --quiet publish-guard
           python - <<'PY' > publish-guard.generated.toml
-          import os
+          import json, os
           terms = [t.strip() for t in os.environ["FORBIDDEN_TERMS"].splitlines() if t.strip()]
           print("[forbidden]")
           print("terms = [")
           for t in terms:
-              print(f"  {t!r},".replace("'", '"'))
+              # json.dumps escapes quotes and backslashes the way a TOML basic
+              # string needs. repr() with the quotes swapped looks like it does
+              # and breaks on the first term carrying either.
+              print("  " + json.dumps(t, ensure_ascii=False) + ",")
           print("]")
           PY
           publish-guard verify . --config publish-guard.generated.toml
