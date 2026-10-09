@@ -5,7 +5,7 @@
 # itself, including for its own security fixes — so Dependabot opens the pull
 # request that moves the pin, and the pin stops being a way of going stale.
 #
-# Weekly rather than daily: these move slowly, and a pull request nobody reads
+# Monthly rather than weekly: these move slowly, and a pull request nobody reads
 # is worse than no pull request.
 
 version: 2
@@ -13,13 +13,13 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     commit-message:
       prefix: chore
 
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     commit-message:
       prefix: chore
