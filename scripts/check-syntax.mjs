@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// src / tools / legacy / scripts 配下の JavaScript を node --check に、
-// シェルスクリプトを bash -n にかける。
+// Run node --check over the JavaScript under src, tools, legacy and
+// scripts, and bash -n over the shell scripts.
 //
-// 個々のファイル名を package.json に列挙すると、ファイルを増やすたびに
-// 更新漏れが起きるため、ディレクトリを走査する方式にしている。
+// It walks the directories rather than listing filenames in package.json,
+// because a list is a thing you forget to update every time you add a file.
 //
-// シェルも見るのは、ここに **VM の電源を落とすスクリプト**があるため。
-// 構文エラーで途中まで実行される事態を、手元で潰しておきたい。
+// The shell scripts are included because one of them **powers the VM off**.
+// A syntax error there means it runs halfway, and that is worth catching
+// before it leaves this machine.
 import { readdir } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -39,7 +40,7 @@ for (const file of scripts) {
   }
 }
 
-// bash が無い環境では飛ばす。CI は Linux なのでそこで必ず見られる。
+// Skipped where there is no bash. CI is Linux, so they are always checked there.
 let shellsChecked = 0;
 for (const file of shells) {
   try {
@@ -47,7 +48,7 @@ for (const file of shells) {
     shellsChecked += 1;
   } catch (error) {
     if (error.code === "ENOENT") {
-      console.log("bash が無いのでシェルスクリプトの検査は飛ばします");
+      console.log("no bash here, so the shell scripts were not checked");
       break;
     }
     failures.push({ file, message: String(error.stderr || error.message).trim() });
@@ -58,8 +59,8 @@ if (failures.length > 0) {
   for (const { file, message } of failures) {
     console.error(`✖ ${file}\n${message}\n`);
   }
-  console.error(`${failures.length} ファイルに構文エラー`);
+  console.error(`syntax errors in ${failures.length} files`);
   process.exit(1);
 }
 
-console.log(`✓ JavaScript ${scripts.length} / シェル ${shellsChecked} ファイルの構文チェックを通過`);
+console.log(`✓ checked ${scripts.length} JavaScript and ${shellsChecked} shell files`);

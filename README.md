@@ -2,8 +2,6 @@
 
 [![test](https://github.com/loncoeng/gui-report-automation/actions/workflows/test.yml/badge.svg)](https://github.com/loncoeng/gui-report-automation/actions/workflows/test.yml)
 
-*[日本語版 / Japanese version](README.ja.md)*
-
 Scheduled automation that **borrows a long-running, human-owned Chrome session**
 on a Linux VM to produce a daily report — without storing any credentials.
 

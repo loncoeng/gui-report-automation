@@ -1,52 +1,56 @@
 # legacy/
 
-**最初に採った、そして捨てたアプローチ**です。動きますが本番では使っていません。
+**The first approach, and the one that was abandoned.** It works. It is not
+what production runs.
 
-残してあるのは、なぜ現行方式（`src/gui-live.js`）があの形になったのかが、
-このコードを見ないと分からないためです。
+It is kept because why the current approach (`src/gui-live.js`) looks the way
+it does is not visible without reading this.
 
-## やろうとしたこと
+## What it tried
 
-Playwright で Chrome を制御する、という素直な方法です。
+The obvious thing: drive Chrome with Playwright.
 
 ```
 run-controlled.sh
-  1. 既存 Chrome でログイン状態と対象ページを事前確認
-  2. Chrome ウィンドウを通常終了
-  3. 残った Chrome 本体に SIGTERM を送り、プロファイルの解放を確認
-  4. 自動化用データディレクトリで run.js を実行
-  5. 成否にかかわらず start-chrome.sh で元のページを復元
+  1. check the sign-in state and the target page in the running Chrome
+  2. close the Chrome windows normally
+  3. SIGTERM whatever Chrome is left, and confirm the profile is released
+  4. run run.js against the automation data directory
+  5. restore the original page with start-chrome.sh, pass or fail
 ```
 
-## なぜ捨てたか
+## Why it was abandoned
 
-**通常の Chrome と Playwright は同じプロファイルを同時に開けません。** そのため
-この方式は必ず「運用者の Chrome を一度閉じる」ことになります。
+**An ordinary Chrome and Playwright cannot hold the same profile at once.**
+So this approach always comes down to closing the operator's Chrome.
 
-閉じている間、その VM を使っている人の作業は中断します。復元も完全ではありません。
-毎朝動かすものとしては、副作用が大きすぎました。
+While it is closed, whoever is using that VM is interrupted. What gets
+restored afterwards is not quite what was there. For something that runs
+every morning, that is too much to do to somebody.
 
-**ログイン状態のコピーも選べませんでした。** 認証情報を自動化側に保存することに
-なるためです。回避策として Chrome のプロファイルディレクトリを参照しようとしましたが、
+**Copying the sign-in state was not an option either**, because it means
+storing the credentials on the automation's side. The way around it was to
+point at Chrome's own profile directory, and:
 
-- Chrome 151 は `~/.config/google-chrome` を直接 DevTools 制御できない
-- シンボリックリンクを既定パスとして置いても拒否される
+- Chrome 151 will not let DevTools drive `~/.config/google-chrome` directly
+- a symlink in the default path is refused as well
 
-ため、実行時だけ同じディレクトリを bind mount する（`prepare-user-data-bind.sh`）
-という手段に追い込まれました。ここまで来て、前提そのものを疑うことにしました。
+which left bind-mounting the same directory for the duration of the run
+(`prepare-user-data-bind.sh`). Arriving there was the point at which the
+premise itself became the thing to doubt.
 
-## 現行方式が引き受けた制約
+## What the current approach accepts instead
 
-「閉じない・複製しない・保存しない」を制約として受け入れ、DevTools を使わず
-アドレスバーへの `javascript:` 注入で DOM を読む方式へ切り替えました。
-制御の自由度は大きく下がりましたが、運用者のセッションに一切触れません。
+Do not close it, do not copy it, do not store it — taken as constraints. No
+DevTools: the DOM is read by injecting `javascript:` into the address bar.
+Far less control, and the operator's session is never touched.
 
-詳細はリポジトリ直下の README を参照してください。
+The repository's own README has the detail.
 
-## 中身
+## What is in here
 
-| ファイル | 内容 |
+| File | What it is |
 |---|---|
-| `run.js` | Playwright による本体 |
-| `run-controlled.sh` | Chrome の終了・実行・復元の手順 |
-| `prepare-user-data-bind.sh` | プロファイルディレクトリの bind mount |
+| `run.js` | the Playwright implementation |
+| `run-controlled.sh` | closing Chrome, running, restoring |
+| `prepare-user-data-bind.sh` | the profile directory bind mount |
